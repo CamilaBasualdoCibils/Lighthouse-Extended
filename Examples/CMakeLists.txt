@@ -1,0 +1,16 @@
+add_executable(LighthouseGLTFLoadExample GLTFLoad/main.cpp)
+target_link_libraries(LighthouseGLTFLoadExample PRIVATE Lighthouse::Extended)
+target_compile_definitions(LighthouseGLTFLoadExample PRIVATE
+    GLTF_EXAMPLE_DEFAULT_MODEL="${CMAKE_SOURCE_DIR}/DamagedHelmet.gltf")
+
+if(TARGET Lighthouse::OpenGLBackend)
+    target_link_libraries(LighthouseGLTFLoadExample PRIVATE Lighthouse::OpenGLBackend)
+    target_compile_definitions(LighthouseGLTFLoadExample PRIVATE GLTF_EXAMPLE_OPENGL)
+endif()
+if(TARGET Lighthouse::VulkanBackend)
+    target_link_libraries(LighthouseGLTFLoadExample PRIVATE Lighthouse::VulkanBackend)
+    target_compile_definitions(LighthouseGLTFLoadExample PRIVATE GLTF_EXAMPLE_VULKAN)
+endif()
+if(NOT TARGET Lighthouse::OpenGLBackend AND NOT TARGET Lighthouse::VulkanBackend)
+    message(FATAL_ERROR "The glTF example requires an OpenGL or Vulkan backend")
+endif()

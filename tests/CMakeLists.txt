@@ -1,6 +1,6 @@
 find_package(GTest CONFIG REQUIRED)
 include(GoogleTest)
-add_executable(LighthouseExtendedAssetTests SceneEntityTests.cpp SceneInspectorTests.cpp)
+add_executable(LighthouseExtendedAssetTests SceneEntityTests.cpp SceneInspectorTests.cpp ResourceImageTests.cpp ResourceModelTests.cpp)
 target_compile_definitions(LighthouseExtendedAssetTests PRIVATE LIGHTHOUSE_TEST_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
 target_link_libraries(LighthouseExtendedAssetTests PRIVATE Lighthouse::Extended GTest::gtest_main GTest::gmock)
 gtest_discover_tests(LighthouseExtendedAssetTests)
