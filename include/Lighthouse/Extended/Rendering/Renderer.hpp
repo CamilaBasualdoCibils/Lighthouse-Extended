@@ -1,78 +1,59 @@
 #pragma once
-#include <Lighthouse/Extended/Materials/Materials.hpp>
-#include <Lighthouse/Extended/Rendering/IRenderExtension.hpp>
-#include <Lighthouse/Extended/World/EntityRenderer.hpp>
-#include <Lighthouse/Extended/World/Scene.hpp>
-#include <Lighthouse/Engine/Rendering/RenderGraphComposer.hpp>
-#include <array>
+#include <Lighthouse/Extended/Rendering/RenderFeatures.hpp>
 #include <functional>
+#include <memory>
 
 namespace Lighthouse
 {
-class Renderer final : public Lighthouse::IRenderTechnique
+class RenderFeatureView
 {
 public:
-  Renderer(Lighthouse::RenderGraphComposer* renderer, Scene* world,
-                Lighthouse::RenderViewHandle window = {});
-  ~Renderer() override;
-  // Camera components and custom camera owners use the same path. Providers
-  // execute during graph construction and must return stable component references.
-  using CameraProvider = std::function<CameraView&(entt::entity)>;
-  void SetCameraProvider(std::function<std::vector<entt::entity>()> entities, CameraProvider camera) {
-    m_cameraEntities = std::move(entities); m_camera = std::move(camera);
-  }
-  void AddExtension(std::unique_ptr<IRenderExtension> extension) {
-    if (!extension) throw std::invalid_argument("Null render extension");
-    m_extensions.push_back(std::move(extension));
-  }
-  void BuildGraph(Lighthouse::TechniqueBuildContext& context) override;
-  void SetAmbientRadiance(Vec3 radiance);
-  void SetDeltaTime(float value) noexcept
+  using ViewSource = std::function<RenderViewFamily()>;
+  explicit RenderFeatureView(std::shared_ptr<IRenderOutput> output);
+  template<class T, class... Args> requires std::derived_from<T, IRenderFeature>
+  T& SetRenderFeature(Args&&... args)
   {
-    m_deltaTime = value;
+    auto feature = std::make_shared<T>(std::forward<Args>(args)...);
+    auto& result = *feature;
+    m_feature = std::move(feature);
+    Invalidate();
+    return result;
   }
-  Lighthouse::RenderGraphResource GetOutput() const noexcept;
-
+  void SetOutput(std::shared_ptr<IRenderOutput> output);
+  void SetViewFamily(RenderViewFamily family);
+  void SetViewSource(ViewSource source);
+  void Invalidate() noexcept { ++m_revision; m_result = {}; }
+  const RenderViewFamily& GetViewFamily() const noexcept { return *m_family; }
+  const RenderFeatureResult& GetResult() const noexcept { return m_result; }
+  bool NeedsRebuild() const noexcept;
 private:
-  void BuildCamera(Lighthouse::TechniqueBuildContext&, entt::entity,
-                   CameraView&);
-  void EnsureLightVolumes();
-  std::array<Lighthouse::DrawIndexedIndirectCommand, 3>
-  VolumeCommands(const std::vector<LightData>& lights) const;
-  void CreateOutputPipeline(Lighthouse::IRenderDevice& device);
-  static bool Finite(Vec3 value);
-  std::vector<LightData> GatherLights() const;
-  std::vector<std::byte> LightingBytes(const std::vector<LightData>& lights,
-                                       size_t capacity,
-                                       const Mat4& viewProjection) const;
-  static void SetViewport(Lighthouse::RenderPassDesc& pass, UVec2 size);
-  Mat4 ViewProjection(entt::entity camera) const;
-  void ReleaseDraws();
-  struct LightingResources
-  {
-    std::shared_ptr<const ShadingModel> model;
-    Lighthouse::DescriptorSetHandle set{}, lights{};
-  };
-  Lighthouse::RenderGraphComposer* m_renderer;
-  Scene* m_world;
-  Lighthouse::RenderViewHandle m_window;
-  float m_deltaTime{};
-  std::uint64_t m_buildId{};
-  Lighthouse::RenderGraphResource m_output{Lighthouse::kInvalidGraphResource};
-  std::vector<LightingResources> m_lighting;
-  Lighthouse::SamplerHandle m_sampler{};
-  std::vector<Lighthouse::BufferHandle> m_lightBuffers;
-  std::array<Lighthouse::RenderMeshHandle, 3> m_volumes{};
-  Lighthouse::DescriptorSetLayoutHandle m_outputSetLayout{};
-  Lighthouse::PipelineLayoutHandle m_outputLayout{};
-  Lighthouse::GraphicsPipelineHandle m_outputPipeline{};
-  Lighthouse::ShaderModuleHandle m_outputVertex{}, m_outputFragment{};
-  std::vector<Lighthouse::DescriptorSetHandle> m_outputSets;
-  Vec3 m_ambientRadiance{0.03f};
-  std::vector<std::unique_ptr<IRenderExtension>> m_extensions;
-  std::function<std::vector<entt::entity>()> m_cameraEntities;
-  CameraProvider m_camera;
-  Materials m_materials;
-  EntityRenderer m_entities;
+  friend class Renderer;
+  void Refresh();
+  std::shared_ptr<IRenderOutput> m_output;
+  std::shared_ptr<IRenderFeature> m_feature;
+  std::shared_ptr<RenderViewFamily> m_family{std::make_shared<RenderViewFamily>()};
+  ViewSource m_source;
+  std::uint64_t m_revision{1}, m_compiledRevision{}, m_compiledFeatureRevision{};
+  RenderFeatureResult m_result;
+};
+
+// Owns independent view/feature configurations, not scene batches or render algorithms.
+// IOutputView still owns acquisition and presentation in RenderGraphComposer.
+class Renderer final : public IRenderTechnique
+{
+public:
+  explicit Renderer(RenderGraphComposer* composer);
+  ~Renderer() override;
+  RenderFeatureView& CreateView(std::shared_ptr<IRenderOutput> output);
+  bool RemoveView(RenderFeatureView& view);
+  void Update(float deltaTime);
+  bool NeedsRebuild() const noexcept;
+  void BuildGraph(TechniqueBuildContext&) override;
+private:
+  RenderGraphComposer* m_composer;
+  ResourceRequests m_resources;
+  std::vector<std::shared_ptr<RenderFeatureView>> m_views;
+  std::uint64_t m_frameId{}, m_buildId{};
+  bool m_topologyChanged{true};
 };
 } // namespace Lighthouse

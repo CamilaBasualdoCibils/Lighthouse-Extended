@@ -34,6 +34,22 @@ public:
         : position(p), rotation(Quat(rEuler)), scale(s) {}
     //explicit Transform(Vec3 position);
 
+    void SetMatrix(const Mat4& value)
+    {
+        position = Vec3(value[3]);
+        scale = Vec3(glm::length(Vec3(value[0])), glm::length(Vec3(value[1])),
+                     glm::length(Vec3(value[2])));
+        if (glm::determinant(glm::mat3(value)) < 0.0f) scale.x = -scale.x;
+        if (scale.x != 0.0f && scale.y != 0.0f && scale.z != 0.0f)
+            rotation = glm::quat_cast(glm::mat3(Vec3(value[0]) / scale.x,
+                                               Vec3(value[1]) / scale.y,
+                                               Vec3(value[2]) / scale.z));
+        else
+            rotation = Quat(1.0f, 0.0f, 0.0f, 0.0f);
+        // Retain the original matrix exactly, including zero scales.
+        matrix = value;
+        matrixDirty = false;
+    }
     void SetPos(Vec3 p)
     {
         position=p;

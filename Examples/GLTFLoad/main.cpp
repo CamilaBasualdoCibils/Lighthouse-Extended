@@ -27,8 +27,8 @@ public:
             .height = 720,
         });
         spdlog::info("parsing glTF asset from path: {}", gltfPath.string());
-        const auto m_asset = Lighthouse::Resource::LoadModel(gltfPath);
-        const auto source = std::get<Lighthouse::Resource::GLTFModel>(m_asset.GetSource());
+        const auto m_asset = Lighthouse::Resource::LoadScene(gltfPath);
+        const auto source = std::get<Lighthouse::Resource::GLTFScene>(m_asset.GetSource());
         spdlog::info("Loaded glTF: {} meshes, {} scenes",
                      source.asset->meshes.size(), source.asset->scenes.size());
     }

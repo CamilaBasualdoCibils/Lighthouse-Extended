@@ -1,7 +1,7 @@
 #pragma once
 
-#include <Lighthouse/Engine/Assets/ImageData.hpp>
-#include <atomic>
+#include <Lighthouse/Engine/Assets/Assets.hpp>
+#include <Lighthouse/Extended/Resources/Handle.hpp>
 #include <cstdint>
 #include <filesystem>
 #include <functional>
@@ -35,7 +35,8 @@ struct GeneratedImage
 {
   std::function<ImageData()> generator;
 };
-using ImageSource = std::variant<FileImage, MemoryImage, GeneratedImage>;
+struct GLTFImage { std::shared_ptr<const GLTFAsset> asset; std::uint32_t image; };
+using ImageSource = std::variant<FileImage, MemoryImage, GeneratedImage, GLTFImage>;
 
 // Copies share identity and updates. Separate factory calls create distinct
 // resources, even for the same file. IDs are process-local, not serialized keys.
@@ -44,6 +45,10 @@ class Image
 {
 public:
   using ResourceID = std::uint64_t;
+  static Image FromGLTF(std::shared_ptr<const GLTFAsset> asset, std::uint32_t index) {
+    if (!asset || index >= asset->images.size()) throw std::out_of_range("glTF image index");
+    return Image(GLTFImage{std::move(asset), index});
+  }
   static Image FromFile(std::filesystem::path path,
                         ImageLoadOptions options)
   {
@@ -123,12 +128,11 @@ private:
     std::uint64_t revision = 1;
     ImageSource source;
   };
-  inline static std::atomic<ResourceID> s_nextID{1};
   std::shared_ptr<State> m_state;
 
   explicit Image(ImageSource source)
       : m_state(std::make_shared<State>(State{
-            s_nextID.fetch_add(1, std::memory_order_relaxed), 1,
+            ResourceDetail::nextID.fetch_add(1, std::memory_order_relaxed), 1,
             std::move(source)}))
   {
   }
