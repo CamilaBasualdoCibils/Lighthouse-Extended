@@ -9,6 +9,7 @@ public:
   using ResourceID = Image::ResourceID;
   using ImageSource = Lighthouse::ImageSource;
   using ImageLoadOptions = Lighthouse::ImageLoadOptions;
+  using MipPolicy = Lighthouse::MipPolicy;
   using FileImage = Lighthouse::FileImage;
   using MemoryImage = Lighthouse::MemoryImage;
   using GeneratedImage = Lighthouse::GeneratedImage;

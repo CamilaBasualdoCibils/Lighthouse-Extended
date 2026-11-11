@@ -21,7 +21,9 @@ struct ForwardRenderServices::Impl
 {
   IRenderDevice& device;
   Materials materials;
-  std::string lighting;
+  std::string lighting, indirect;
+  DescriptorSetLayoutHandle indirectLayout{};
+  DescriptorSetHandle indirectSet{};
   DescriptorSetLayoutHandle lightsLayout{}, resolveSetLayout{};
   PipelineLayoutHandle resolveLayout{};
   ShaderModuleHandle resolveVertex{}, resolveFragment{};
@@ -117,9 +119,15 @@ struct ForwardRenderServices::Impl
   }
 };
 ForwardRenderServices::ForwardRenderServices(IRenderDevice& device,
-                                             std::string lighting)
+                                             std::string lighting,
+                                             std::string indirect,
+                                             DescriptorSetLayoutHandle indirectLayout,
+                                             DescriptorSetHandle indirectSet)
     : m_impl(std::make_unique<Impl>(device, std::move(lighting)))
 {
+  m_impl->indirect = std::move(indirect);
+  m_impl->indirectLayout = indirectLayout;
+  m_impl->indirectSet = indirectSet;
 }
 ForwardRenderServices::~ForwardRenderServices() = default;
 GraphicsPipelineHandle
@@ -143,12 +151,12 @@ ForwardRenderServices::GetPipeline(const VertexLayout& layout,
   pipeline->device = &m_impl->device;
   pipeline->material = material;
   const auto compiled =
-      material->Compile(MaterialRenderPath::Forward, m_impl->lighting);
+      material->Compile(MaterialRenderPath::Forward, m_impl->lighting, m_impl->indirect);
   pipeline->vertex = m_impl->device.CreateShaderModule(*compiled.vertex);
   pipeline->fragment = m_impl->device.CreateShaderModule(*compiled.fragment);
-  pipeline->layout = m_impl->device.CreatePipelineLayout(
-      {.sets = {material->frameLayout, material->parametersLayout,
-                m_impl->lightsLayout}});
+  std::vector<DescriptorSetLayoutHandle> sets{material->frameLayout, material->parametersLayout, m_impl->lightsLayout};
+  if (m_impl->indirectLayout) sets.push_back(m_impl->indirectLayout);
+  pipeline->layout = m_impl->device.CreatePipelineLayout({.sets = sets});
   GraphicsPipelineDesc desc{.vertexShader = pipeline->vertex,
                             .fragmentShader = pipeline->fragment,
                             .vertexLayout = layout,
@@ -172,6 +180,7 @@ std::shared_ptr<ForwardDrawBindings> ForwardRenderServices::CreateBindings(
   auto& device = m_impl->device;
   auto result = std::make_shared<ForwardDrawBindings>();
   result->device = &device;
+  result->indirectSet = m_impl->indirectSet;
   result->source = std::move(material);
   result->instance = m_impl->Instance(result->source);
   result->frame = device.CreateBuffer(

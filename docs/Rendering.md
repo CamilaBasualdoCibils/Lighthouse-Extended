@@ -87,7 +87,8 @@ instantiates its default scene. Those operations remain CPU-side; the shared ren
 referenced meshes and images when the scene provider builds its rendering passes.
 
 The RenderFeatures example uses this flow to display DamagedHelmet in its top-left
-quadrant, with three ordinary scene light entities. Other quadrants remain empty.
+quadrant, with three ordinary scene light entities, Newport Loft HDRI sky and image-based
+lighting. Other quadrants remain empty.
 
 ## Outputs and multiple views
 
@@ -166,3 +167,127 @@ Creating a native material ray pipeline remains capability-gated. The current hi
 library retains its existing color-payload/placeholder attribute contract; a complete
 path tracer, real hit-attribute bindings and ray lighting/integration are not supplied
 by this material compilation change.
+
+## Environment and HDRI indirect lighting
+
+Include `Lighthouse/Extended/Rendering/EnvironmentProviders.hpp`. Each forward
+feature accepts one environment provider and one indirect-lighting provider.
+Composition of multiple lighting techniques belongs inside a provider.
+
+```cpp
+auto hdri = std::make_shared<HDRIEnvironment>(Resource::LoadImage("sky.hdr"));
+forward.SetEnvironmentProvider<EnvironmentProvider>(
+    std::make_shared<HDRISkyProvider>(hdri));
+forward.SetIndirectLightingProvider<HDRIIndirectLightingProvider>(hdri);
+```
+
+`IEnvironmentProvider` exposes `ISkyProvider`. Sky records a separate fullscreen
+pass into scene-linear RGBA16f color before geometry, leaving depth available for
+opaque and transparent objects. Its graph contract takes `RenderFeatureContext`
+and `RenderFeatureResult`, so another rendering feature can reuse it. Sky uses
+live projection and view rotation; camera translation does not move the sky.
+
+`IIndirectLightingProvider` prepares graph dependencies and contributes GLSL plus
+its descriptor layout/set at set 3. Its shader exposes
+`ForwardDiffuseIrradiance(position, normal)`,
+`ForwardEnvironmentRadiance(position, direction, roughness)`, and
+`ForwardEnvironmentBRDF(nv, roughness)`. Lit owns albedo, metallic, Fresnel and the
+surface response. Unlit bypasses these contributions.
+
+Specular IBL uses a cached GGX-prefiltered equirectangular mip chain and a 128x128
+BRDF integration LUT. Each prefilter level represents a known roughness; the
+material selects/interpolates levels using roughness and combines radiance with
+the LUT. There is no per-fragment stochastic integration loop. During prefiltering,
+GGX sample PDF and latitude-dependent texel solid angle select ordinary source
+mips, reducing high-frequency aliasing from bright HDR features. The default
+`HDRIIndirectLightingOptions::specularResolution` is 512x256 and
+`specularSamples` is 1024; both are ordinary API options. Prefiltering stops at
+16x8 for a 2:1 map to retain directional information at roughness one. The sky
+continues to sample the original HDRI, not its rough reflection convolution.
+
+The default indirect option computes a 64x32 irradiance map with 1024
+cosine-weighted samples per texel on the CPU when first needed. The result is
+cached, not recomputed per frame. Importing a map is explicit:
+
+```cpp
+HDRIIndirectLightingOptions options;
+options.mode = IrradianceMode::Import;
+options.irradiance = Resource::LoadImage("sky.irr.hdr");
+forward.SetIndirectLightingProvider<HDRIIndirectLightingProvider>(hdri, options);
+```
+
+No sibling `.irr.hdr` is searched for or automatically loaded. Both maps use linear
+RGBA32f, equirectangular coordinates (longitude `atan(z,x)`, north at the first row).
+Imported irradiance is physical irradiance, the integral of incoming radiance
+times cosine; Lit divides diffuse irradiance by pi. `ComputeHDRIIrradiance` exposes
+the same CPU convolution for other callers.
+
+`Resource::LoadImage` still creates a lazy handle. `Image::Resolve()` explicitly
+uses the vendored stb_image decoder for PNG/JPEG (RGBA8) and Radiance RGBE HDR
+(linear RGBA32f), preserving values
+above one. It also handles memory, generator and glTF sources. A requested format
+must match the decoded format; conversion is not implicit. `flipY` works for both
+byte and float images. HDRI resources share decoded pixels and GPU textures across
+sky and IBL. `Image::MarkDirty()` and updates invalidate the provider revision,
+causing graph rebuild, re-upload and irradiance regeneration on the next update.
+Both graphics backends upload byte/half/float mip data directly. Texture views
+expose the entire supplied chain. IBL prefiltering and BRDF integration use cached
+initialization draws on graphics queue zero and wait for completion once; source
+revision changes invalidate the environment convolution cache.
+Render devices must outlive providers and compiled graphs using their resources.
+
+Forward materials without lighting providers now receive zero ambient and zero
+indirect light. `DefaultForwardLightingProvider` defaults its optional legacy
+constant ambient argument to zero; a caller can still explicitly request one.
+
+The example loads `/home/camila/Downloads/HDRIs/Newport_Loft_Ref.hdr` through
+`Resource::LoadImage` and explicitly selects `IrradianceMode::Compute` in its
+`HDRIIndirectLightingOptions`. Source images, computation settings and imported
+irradiance maps are configured through the C++ API shown above.
+
+The asset tests cover HDR decoding, malformed RLE, float row flipping, laziness,
+cache invalidation and constant-radiance irradiance normalization. To exercise
+local Newport assets and the offscreen helmet tests, set `LIGHTHOUSE_TEST_HDRI`
+to the source HDR file. Add `LIGHTHOUSE_TEST_IRRADIANCE` for the import path, or
+leave it unset to test computation. Run `LighthouseExtendedForwardTests` for
+OpenGL and add `--vulkan` for Vulkan. These tests disable direct lights, compare
+IBL against the same sky without IBL, and verify quadrant preservation.
+
+## Image mip policies and data
+
+```cpp
+auto image = Resource::LoadImage("textures/brick.png", ImageLoadOptions{
+    .mipPolicy = MipPolicy::Generate
+});
+```
+
+`ImageLoadOptions::mipPolicy` defaults to `Auto`. Loading remains lazy:
+
+- `None`: retain only the base level.
+- `Load`: retain levels present in the asset; a base-only asset stays base-only.
+- `Generate`: discard authored lower levels and generate a complete chain.
+- `Auto`: preserve an authored chain; generate when only the base is available.
+
+stb formats such as PNG/JPEG/HDR contain a base level. The loader also accepts
+uncompressed, little-endian KTX1 2D textures with RGBA8, sRGB RGBA8, or RGBA32f
+pixels, including authored mip levels. Compressed KTX, KTX2, DDS, arrays and cubes
+are not decoded by this implementation. `flipY` applies to every supplied mip.
+
+`ImageData` owns a public `format` and `std::vector<ImageMipData> mips`; each mip
+owns `width`, `height`, `depth` and tightly packed `data`. Levels must halve each
+non-unit dimension, and supplied chains may be partial. The single-base-level
+constructor and `GetResolution()/GetData()` remain compatible; pass a level index
+to inspect another mip. `GetMipCount()`, `Validate()` and `ToImageDesc()` support
+the full chain. Memory/generator resources preserve the mip data they provide;
+call `GenerateImageMipmaps` or `ApplyImageMipPolicy` to process these explicitly.
+
+Ordinary mip generation area-filters all source pixels, including odd-sized edges
+and 3D volumes. Float/half images remain linear; explicitly sRGB-tagged image RGB
+is decoded to linear before averaging and re-encoded afterwards. Untagged RGBA8
+is averaged numerically, appropriate for data maps. Ordinary mip levels provide
+sampling footprints; they are not interchangeable with GGX roughness convolution.
+
+`LighthouseExtendedMipTests` (or `--vulkan`) verifies authored byte/float mip
+uploads, nonzero LOD sampling, GGX blur and constant-radiance preservation, plus
+prefilter/LUT caching. CPU mip tests verify policies, authored KTX levels,
+non-power-of-two dimensions, volume filtering and HDR/sRGB averaging.

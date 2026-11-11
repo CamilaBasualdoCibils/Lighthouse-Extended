@@ -16,6 +16,7 @@
 #include <Lighthouse/Backends/Render/Vulkan/VulkanBackend.hpp>
 #endif
 
+#include <Lighthouse/Extended/Rendering/EnvironmentProviders.hpp>
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -124,6 +125,12 @@ public:
     addLight("Fill light", {10, 45, 0}, {0.65f, 0.8f, 1.0f}, 1.5f);
     addLight("Rim light", {-15, 150, 0}, {1.0f, 0.85f, 0.65f}, 3.0f);
 
+    auto environment = std::make_shared<HDRIEnvironment>(Resource::LoadImage(
+        "/home/camila/Downloads/HDRIs/Newport_Loft_Ref.hdr",
+        ImageLoadOptions{.mipPolicy=MipPolicy::Generate}));
+    HDRIIndirectLightingOptions ibl;
+    ibl.mode = IrradianceMode::Compute;
+
     for (std::size_t i = 0; i < m_views.size(); ++i)
     {
       auto& view = m_renderer->CreateView(
@@ -133,8 +140,9 @@ public:
       {
         auto& forward = view.SetRenderFeature<ForwardRenderFeature>();
         forward.AddProvider<SceneProvider>(m_store);
-        forward.SetLighting<DefaultForwardLightingProvider>(m_store,
-                                                            Vec3(0.08f));
+        forward.SetLighting<DefaultForwardLightingProvider>(m_store);
+        forward.SetEnvironmentProvider<EnvironmentProvider>(std::make_shared<HDRISkyProvider>(environment));
+        forward.SetIndirectLightingProvider<HDRIIndirectLightingProvider>(environment, ibl);
       }
       else
       {
@@ -145,6 +153,7 @@ public:
     SetupInput();
     m_renderer->Update(0.0f);
     composer.Compile();
+    std::cout << composer.GetRenderGraph().Dot() << std::endl;
   }
 
   void OnUpdate(float deltaTime) override

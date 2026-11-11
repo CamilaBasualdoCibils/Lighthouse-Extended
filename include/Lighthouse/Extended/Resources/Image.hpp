@@ -15,11 +15,18 @@
 
 namespace Lighthouse
 {
-// Instructions for a future decoder; creating a resource never opens a file.
+enum class MipPolicy { None, Load, Generate, Auto };
+
+// Area-filter the base level into a full ordinary mip chain.
+ImageData GenerateImageMipmaps(const ImageData&);
+ImageData ApplyImageMipPolicy(ImageData, MipPolicy);
+
+// Creating a resource never opens a file.
 struct ImageLoadOptions
 {
   std::optional<ImageFormat> format;
   bool flipY = false;
+  MipPolicy mipPolicy = MipPolicy::Auto;
 };
 
 struct FileImage
@@ -65,6 +72,7 @@ public:
   // ImageData owns its pixels: lvalues are copied and rvalues transfer ownership.
   static Image FromData(ImageData data)
   {
+    data.Validate();
     return Image(MemoryImage{std::make_shared<const ImageData>(std::move(data))});
   }
 
@@ -83,8 +91,12 @@ public:
   // A snapshot retains owned pixels/callbacks across subsequent updates.
   ImageSource GetSource() const { return m_state->source; }
 
+  // Decode/generate on explicit demand. HDR files retain linear RGBA32f values.
+  ImageData Resolve() const;
+
   void UpdateData(ImageData data)
   {
+    data.Validate();
     Replace(MemoryImage{std::make_shared<const ImageData>(std::move(data))});
   }
   void UpdateFile(std::filesystem::path path, ImageLoadOptions options)

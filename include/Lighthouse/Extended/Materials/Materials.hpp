@@ -137,7 +137,8 @@ struct Material : std::enable_shared_from_this<Material>
   // All targets use the same surface model, parameters and evaluateMaterial().
   // Ray shader compilation does not require a device with ray-tracing support.
   CompiledMaterialShaders Compile(MaterialRenderPath path,
-                                  std::string_view lightingSource = {}) const;
+                                  std::string_view lightingSource = {},
+                                  std::string_view indirectSource = {}) const;
 
   SurfaceModel model = SurfaceModel::Unlit;
   std::shared_ptr<const ShadingModel> shadingModel;

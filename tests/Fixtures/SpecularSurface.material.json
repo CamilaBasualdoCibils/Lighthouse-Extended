@@ -1,0 +1,5 @@
+{
+  "base": "Lit",
+  "shader": "SpecularSurface.glsl",
+  "parameters": {"roughness": {"type": "float", "default": 0.1}}
+}

@@ -20,6 +20,9 @@ struct ForwardRenderContext
   // Incident-light shader declares set 2/binding 0; surface response belongs to Materials.
   std::string lightingShader;
   BufferHandle lightingBuffer{};
+  std::string indirectShader;
+  DescriptorSetLayoutHandle indirectLayout{};
+  DescriptorSetHandle indirectSet{};
   std::shared_ptr<ForwardRenderServices> rendering;
 };
 struct RayGeometryInstance
@@ -63,6 +66,10 @@ public:
   // Geometry providers consume feature-created pipelines; they do not shade lights.
   virtual void BuildGraph(ForwardRenderContext&) = 0;
 };
+// Indirect shaders expose ForwardDiffuseIrradiance(position, normal) and
+// ForwardEnvironmentRadiance(position, direction, roughness) plus
+// ForwardEnvironmentBRDF(nv, roughness), with resources at set 3.
+LIGHTHOUSE_RENDER_PROVIDER(IIndirectLightingProvider, ForwardRenderContext);
 LIGHTHOUSE_RENDER_PROVIDER(IForwardShadowProvider, ForwardRenderContext);
 LIGHTHOUSE_RENDER_PROVIDER(IForwardReflectionProvider, ForwardRenderContext);
 LIGHTHOUSE_RENDER_PROVIDER(IForwardLightAssignmentProvider, ForwardRenderContext);
@@ -103,9 +110,14 @@ private:
   std::vector<std::shared_ptr<IDeferredCompositeProvider>> m_compositors;
   std::vector<std::shared_ptr<IDeferredPostProcess>> m_post;
 };
+class IEnvironmentProvider;
 class ForwardRenderFeature : public RenderFeatureBase
 {
 public:
+  template<class T, class... Args> requires std::derived_from<T, IEnvironmentProvider>
+  T& SetEnvironmentProvider(Args&&... args) { return Set<T>(m_environment, std::forward<Args>(args)...); }
+  template<class T, class... Args> requires std::derived_from<T, IIndirectLightingProvider>
+  T& SetIndirectLightingProvider(Args&&... args) { return Set<T>(m_indirect, std::forward<Args>(args)...); }
   template<class T, class... Args> requires std::derived_from<T, IForwardGeometryProvider>
   T& AddProvider(Args&&... args) { return Add<T>(m_geometry, std::forward<Args>(args)...); }
   template<class T, class... Args> requires std::derived_from<T, IForwardLightingProvider>
@@ -126,6 +138,8 @@ protected:
   virtual void BuildLightAssignment(ForwardRenderContext&) {}
 private:
   std::shared_ptr<ForwardRenderServices> m_rendering;
+  std::shared_ptr<IEnvironmentProvider> m_environment;
+  std::shared_ptr<IIndirectLightingProvider> m_indirect;
   std::vector<std::shared_ptr<IForwardGeometryProvider>> m_geometry;
   std::shared_ptr<IForwardLightingProvider> m_lighting;
   std::shared_ptr<IForwardShadowProvider> m_shadows;

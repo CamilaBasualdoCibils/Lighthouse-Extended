@@ -1,5 +1,6 @@
 #include <Lighthouse/Extended/Rendering/RenderFeatures.hpp>
 #include <Lighthouse/Extended/Rendering/ForwardRendering.hpp>
+#include <Lighthouse/Extended/Rendering/EnvironmentProviders.hpp>
 
 namespace Lighthouse
 {
@@ -88,6 +89,7 @@ RenderFeatureResult DeferredRenderFeature::BuildGraph(RenderFeatureContext& fram
 }
 void ForwardRenderFeature::Update(RenderUpdateContext& ctx)
 {
+  UpdateOne(m_environment, ctx); UpdateOne(m_indirect, ctx);
   RenderFeatureBase::Update(ctx);
   UpdateAll(m_geometry, ctx); UpdateOne(m_shadows, ctx); UpdateOne(m_lighting, ctx);
   UpdateOne(m_reflections, ctx); UpdateAll(m_compositors, ctx); UpdateAll(m_post, ctx);
@@ -100,8 +102,14 @@ RenderFeatureResult ForwardRenderFeature::BuildGraph(RenderFeatureContext& frame
   BuildOne(m_shadows, ctx);
   BuildOne(m_lighting, ctx);
   BuildLightAssignment(ctx);
-  m_rendering=std::make_shared<ForwardRenderServices>(frame.technique.device,ctx.lightingShader);
+  BuildOne(m_indirect, ctx);
+  m_rendering=std::make_shared<ForwardRenderServices>(frame.technique.device,ctx.lightingShader, ctx.indirectShader, ctx.indirectLayout, ctx.indirectSet);
   ctx.rendering=m_rendering; Hold(frame,m_rendering);
+  if (m_environment && m_environment->GetSky()) {
+    Hold(frame, m_environment);
+    m_rendering->BeginGeometry(ctx);
+    m_environment->GetSky()->BuildGraph(frame, ctx.output);
+  }
   BuildAll(m_geometry, ctx);
   BuildOne(m_reflections, ctx);
   BuildAll(m_compositors, ctx);
@@ -112,6 +120,8 @@ RenderFeatureResult ForwardRenderFeature::BuildGraph(RenderFeatureContext& frame
 std::uint64_t ForwardRenderFeature::GetConfigurationRevision() const noexcept
 {
   auto revision=RenderFeatureBase::GetConfigurationRevision();
+  if (m_environment) revision=revision*1099511628211ull ^ m_environment->GetConfigurationRevision();
+  if (m_indirect) revision=revision*1099511628211ull ^ m_indirect->GetConfigurationRevision();
   for(const auto& provider:m_geometry)revision=revision*1099511628211ull ^ provider->GetConfigurationRevision();
   return revision;
 }

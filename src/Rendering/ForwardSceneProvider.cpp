@@ -50,9 +50,10 @@ void SceneForwardRenderProvider::BuildGraph(ForwardRenderContext& ctx)
         const auto size = texture->sourceImage->resolution;
         draw.resources.push_back(ctx.frame.technique.graph.Import(
             "Forward material texture",
-            ImportedRenderGraphImage::Desc{size.x, size.y, ImageFormat::RGBA8,
+            ImportedRenderGraphImage::Desc{size.x, size.y, texture->sourceImage->format,
                                            ImageUsage::Sampled},
-            ImportedRenderGraphImage{texture->view, texture->image}));
+            ImportedRenderGraphImage{texture->view, texture->image,
+                {ImageAspect::Color, 0, texture->sourceImage->mipLevels, 0, 1}}));
       }
       draws.push_back(std::move(draw));
     }
@@ -150,6 +151,8 @@ void SceneForwardRenderProvider::BuildGraph(ForwardRenderContext& ctx)
             commands.BindDescriptorSet(1, draw->bindings->materialSet);
             if (draw->bindings->lightSet)
               commands.BindDescriptorSet(2, draw->bindings->lightSet);
+            if (draw->bindings->indirectSet)
+              commands.BindDescriptorSet(3, draw->bindings->indirectSet);
             commands.BindVertexBuffer(draw->mesh->vertices,
                                       sizeof(Mesh3DVertex));
             commands.BindIndexBuffer(draw->mesh->indices);

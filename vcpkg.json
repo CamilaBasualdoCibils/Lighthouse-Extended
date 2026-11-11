@@ -74,8 +74,6 @@
         "wayland"
       ],
       "platform": "linux"
-    },
-    "libjpeg-turbo",
-    "libpng"
+    }
   ]
 }

@@ -6,9 +6,6 @@
 #include <numeric>
 #include <set>
 #include <tuple>
-#include <jpeglib.h>
-#include <png.h>
-#include <setjmp.h>
 
 namespace Lighthouse
 {
@@ -36,104 +33,6 @@ std::vector<std::byte> ReadFile(const std::filesystem::path& path)
   if (!bytes.empty() && !file.read(reinterpret_cast<char*>(bytes.data()), bytes.size()))
     throw std::runtime_error("Short read: " + path.string());
   return bytes;
-}
-struct JpegError { jpeg_error_mgr base; jmp_buf jump; char message[JMSG_LENGTH_MAX]; };
-void JpegFailure(j_common_ptr decoder)
-{
-  auto* error = reinterpret_cast<JpegError*>(decoder->err);
-  error->base.format_message(decoder, error->message);
-  longjmp(error->jump, 1);
-}
-ImageData DecodeImage(std::span<const std::byte> bytes)
-{
-  if (bytes.size() >= 8 && png_sig_cmp(reinterpret_cast<png_const_bytep>(bytes.data()), 0, 8) == 0)
-  {
-    png_image image{}; image.version = PNG_IMAGE_VERSION;
-    if (!png_image_begin_read_from_memory(&image, bytes.data(), bytes.size()))
-      throw std::runtime_error("Invalid PNG image");
-    image.format = PNG_FORMAT_RGBA;
-    std::vector<std::byte> pixels(PNG_IMAGE_SIZE(image));
-    const UVec2 size{image.width, image.height};
-    const bool success = png_image_finish_read(&image, nullptr, pixels.data(), 0, nullptr);
-    const std::string message = image.message;
-    png_image_free(&image);
-    if (!success) throw std::runtime_error("PNG decode failed: " + message);
-    return {size, ImageFormat::RGBA8, std::move(pixels)};
-  }
-  if (bytes.size() < 2 || bytes[0] != std::byte{0xff} || bytes[1] != std::byte{0xd8})
-    throw std::runtime_error("Scene textures currently require PNG or JPEG data");
-  struct DecodeState {
-    jpeg_decompress_struct decoder{};
-    JpegError error{};
-    std::vector<std::byte> pixels;
-    std::vector<JSAMPLE> row;
-  };
-  // Modified decode state lives on the heap so libjpeg's longjmp error path
-  // cannot invalidate automatic C++ container state.
-  auto state = std::make_unique<DecodeState>();
-  auto& decoder = state->decoder;
-  auto& error = state->error;
-  auto& pixels = state->pixels;
-  auto& row = state->row;
-  decoder.err = jpeg_std_error(&error.base);
-  error.base.error_exit = JpegFailure;
-  if (setjmp(error.jump))
-  {
-    jpeg_destroy_decompress(&decoder);
-    throw std::runtime_error("JPEG decode failed: " + std::string(error.message));
-  }
-  jpeg_create_decompress(&decoder);
-  jpeg_mem_src(&decoder, reinterpret_cast<const unsigned char*>(bytes.data()), bytes.size());
-  jpeg_read_header(&decoder, TRUE);
-  decoder.out_color_space = JCS_RGB;
-  jpeg_start_decompress(&decoder);
-  const UVec2 size{decoder.output_width, decoder.output_height};
-  if (!size.x || !size.y || std::size_t(size.x) > SIZE_MAX / 4 / size.y)
-  { jpeg_destroy_decompress(&decoder); throw std::runtime_error("Invalid JPEG dimensions"); }
-  pixels.resize(std::size_t(size.x) * size.y * 4);
-  row.resize(std::size_t(size.x) * 3);
-  while (decoder.output_scanline < decoder.output_height)
-  {
-    const auto y = decoder.output_scanline;
-    JSAMPROW rows[]{row.data()};
-    jpeg_read_scanlines(&decoder, rows, 1);
-    for (std::size_t x = 0; x < size.x; ++x)
-    {
-      const auto offset = (std::size_t(y) * size.x + x) * 4;
-      for (int channel = 0; channel < 3; ++channel) pixels[offset + channel] = std::byte(row[x * 3 + channel]);
-      pixels[offset + 3] = std::byte{255};
-    }
-  }
-  jpeg_finish_decompress(&decoder);
-  jpeg_destroy_decompress(&decoder);
-  return {size, ImageFormat::RGBA8, std::move(pixels)};
-}
-ImageData LoadPixels(const Image& image)
-{
-  return std::visit([](const auto& source) -> ImageData {
-    using T = std::decay_t<decltype(source)>;
-    if constexpr (std::is_same_v<T, MemoryImage>) return *source.data;
-    else if constexpr (std::is_same_v<T, GeneratedImage>) return source.generator();
-    else if constexpr (std::is_same_v<T, FileImage>)
-    {
-      auto pixels = DecodeImage(ReadFile(source.path));
-      if (source.options.format && *source.options.format != ImageFormat::RGBA8)
-        throw std::runtime_error("File texture conversion currently supports RGBA8 only");
-      if (!source.options.flipY) return pixels;
-      auto bytes = std::vector<std::byte>(pixels.GetData().begin(), pixels.GetData().end());
-      const auto size = pixels.GetResolution();
-      for (std::size_t y = 0; y < size.y / 2; ++y)
-        for (std::size_t x = 0; x < std::size_t(size.x) * 4; ++x)
-          std::swap(bytes[y * size.x * 4 + x], bytes[(size.y - y - 1) * size.x * 4 + x]);
-      return {size, ImageFormat::RGBA8, std::move(bytes)};
-    }
-    else
-    {
-      const auto& data = source.asset->images.at(source.image).data;
-      if (const auto* path = std::get_if<std::filesystem::path>(&data)) return DecodeImage(ReadFile(*path));
-      return DecodeImage(std::get<std::vector<std::byte>>(data));
-    }
-  }, image.GetSource());
 }
 template<class T> T ReadScalar(const std::byte* bytes) { T value; std::memcpy(&value, bytes, sizeof(T)); return value; }
 std::size_t ComponentSize(AccessorComponentType type)
@@ -252,8 +151,9 @@ struct SceneRenderStore::GPUCache
   std::shared_ptr<SceneImageGPU> UploadImage(IRenderDevice& device, const ImageData& pixels)
   {
     auto result = std::make_shared<SceneImageGPU>(); result->device = &device; result->resolution = pixels.GetResolution();
+    result->format=pixels.GetFormat(); result->mipLevels=pixels.GetMipCount();
     result->image = device.CreateImage(pixels.ToImageDesc());
-    result->view = device.CreateImageView({.image=result->image, .format=pixels.GetFormat()});
+    result->view = device.CreateImageView({.image=result->image, .format=pixels.GetFormat(), .mipLevelCount=pixels.GetMipCount()});
     return result;
   }
   std::shared_ptr<SceneTextureGPU> Default(IRenderDevice& device, std::array<unsigned char,4> pixel)
@@ -274,11 +174,11 @@ struct SceneRenderStore::GPUCache
     if (cached.object && cached.revision==image.GetRevision()) return cached.object;
     auto& imageCache=images[{device.DeviceId(),image.GetID()}];
     if (!imageCache.object || imageCache.revision!=image.GetRevision()) {
-      imageCache.object=UploadImage(device,LoadPixels(image)); imageCache.revision=image.GetRevision();
+      imageCache.object=UploadImage(device,image.Resolve()); imageCache.revision=image.GetRevision();
     }
     auto result=std::make_shared<SceneTextureGPU>(); result->device=&device;
     result->sourceImage=imageCache.object; result->image=result->sourceImage->image; result->view=result->sourceImage->view;
-    auto sampler=texture.GetSampler(); sampler.mipmap=SamplerMipmapFilter::None; // Only level zero is uploaded initially.
+    auto sampler=texture.GetSampler();
     result->sampler=device.CreateSampler(sampler);
     cached={image.GetRevision(),result}; return result;
   }

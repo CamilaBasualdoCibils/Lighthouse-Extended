@@ -19,6 +19,8 @@ struct SceneMeshGPU
 struct SceneImageGPU
 {
   UVec2 resolution{};
+  ImageFormat format{ImageFormat::Undefined};
+  std::uint32_t mipLevels{1};
   IRenderDevice* device{};
   ImageHandle image{};
   ImageViewHandle view{};
@@ -51,7 +53,7 @@ struct ForwardDrawBindings
 {
   IRenderDevice* device{};
   BufferHandle frame{}, material{};
-  DescriptorSetHandle frameSet{}, materialSet{}, lightSet{};
+  DescriptorSetHandle frameSet{}, materialSet{}, lightSet{}, indirectSet{};
   std::shared_ptr<SceneMaterialGPU> source;
   std::shared_ptr<const MaterialInstance> instance;
   ~ForwardDrawBindings();
@@ -61,7 +63,10 @@ struct ForwardDrawBindings
 class ForwardRenderServices
 {
 public:
-  ForwardRenderServices(IRenderDevice&, std::string lightingShader);
+  ForwardRenderServices(IRenderDevice&, std::string lightingShader,
+                        std::string indirectShader = {},
+                        DescriptorSetLayoutHandle indirectLayout = {},
+                        DescriptorSetHandle indirectSet = {});
   ~ForwardRenderServices();
   GraphicsPipelineHandle GetPipeline(const VertexLayout&, std::shared_ptr<SceneMaterialGPU>);
   std::shared_ptr<ForwardDrawBindings> CreateBindings(std::shared_ptr<SceneMaterialGPU>, BufferHandle lights);
@@ -77,7 +82,7 @@ class DefaultForwardLightingProvider final : public IForwardLightingProvider
 {
 public:
   explicit DefaultForwardLightingProvider(std::shared_ptr<SceneRenderStore> store,
-                                          Vec3 ambientRadiance = Vec3(0.03f));
+                                          Vec3 ambientRadiance = Vec3(0.0f));
   void Update(RenderUpdateContext&) override;
   void BuildGraph(ForwardRenderContext&) override;
   std::vector<LightData> GetLights() const;

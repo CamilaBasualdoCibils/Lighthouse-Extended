@@ -14,6 +14,7 @@ void main() {
                                                clamp(surface.metallic,0,1),clamp(surface.roughness,0.045,1));
     vec3 radiance=max(surface.emission,vec3(0))+shading.albedo*ForwardAmbientRadiance()*clamp(surface.occlusion,0,1);
     vec3 viewDirection=normalize(frame.cameraPosition.xyz-worldPosition);
+    radiance+=EvaluateIndirectSurface(shading, worldPosition, viewDirection)*clamp(surface.occlusion,0,1);
     for(uint i=0u;i<ForwardLightCount();++i)
         radiance+=EvaluateSurface(shading,viewDirection,ForwardLightAt(i,worldPosition));
     color=vec4(radiance,surface.opacity);
