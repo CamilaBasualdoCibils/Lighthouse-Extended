@@ -16,7 +16,7 @@ if(NOT TARGET Lighthouse::OpenGLBackend AND NOT TARGET Lighthouse::VulkanBackend
 endif()
 
 add_executable(LighthouseRenderFeaturesExample RenderFeatures/main.cpp)
-target_link_libraries(LighthouseRenderFeaturesExample PRIVATE Lighthouse::Extended)
+target_link_libraries(LighthouseRenderFeaturesExample PRIVATE Lighthouse::Extended Lighthouse::GLFWInputBackend)
 target_compile_definitions(LighthouseRenderFeaturesExample PRIVATE
     RENDER_FEATURES_DEFAULT_MODEL="${CMAKE_SOURCE_DIR}/DamagedHelmet.gltf")
 if(TARGET Lighthouse::OpenGLBackend)
