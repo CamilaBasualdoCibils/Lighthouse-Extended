@@ -48,7 +48,7 @@ int main(int argc, char** argv)
         return 1;
     }
     gltfPath = argc == 2 ? std::filesystem::path(argv[1])
-                         : std::filesystem::path(GLTF_EXAMPLE_DEFAULT_MODEL);
+                         : std::filesystem::path("DamagedHelmet.gltf");
 
     Lighthouse::Config config{
         .name = "Lighthouse Extended glTF Load Example",

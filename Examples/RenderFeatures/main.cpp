@@ -1,3 +1,6 @@
+#include "Lighthouse/Engine/Rendering/ImGuiView.hpp"
+#include "Lighthouse/Extended/Editor/RendererTool.hpp"
+#include "Lighthouse/Extended/Editor/EntitySystemTool.hpp"
 #include "Lighthouse/Extended/Resources/Resource.hpp"
 #include <Lighthouse/Backends/Input/GLFW/GLFWInputBackend.hpp>
 #include <Lighthouse/Engine/Engine.hpp>
@@ -102,14 +105,17 @@ public:
   void OnStart() override
   {
     auto& composer = GetRenderer();
-    m_window = composer.CreateWindowView({
-        .title = "Lighthouse Extended - Render Features",
-        .width = 1280,
-        .height = 720,
-    });
+    m_window = composer.CreateWindowView(
+        {.title = "Lighthouse Extended - Render Features",
+         .width = 1920,
+         .height = 1080,
+         .swapchainFormats = {Lighthouse::SwapchainFormat::HDR10,
+                              Lighthouse::SwapchainFormat::ScRGB,
+                              Lighthouse::SwapchainFormat::SRGB},.ImGuiHost=true});
+
     const auto technique = composer.AddTechnique<Renderer>(&composer);
     m_renderer = composer.GetTechnique<Renderer>(technique);
-    const auto resource = Resource::LoadScene(RENDER_FEATURES_DEFAULT_MODEL);
+    const auto resource = Resource::LoadScene("DamagedHelmet.gltf");
     m_scene = std::make_unique<Scene>(resource.GetDefaultScene());
     m_store = std::make_shared<SceneRenderStore>(*m_scene);
     const auto addLight =
@@ -126,11 +132,14 @@ public:
     addLight("Rim light", {-15, 150, 0}, {1.0f, 0.85f, 0.65f}, 3.0f);
 
     auto environment = std::make_shared<HDRIEnvironment>(Resource::LoadImage(
-        "/home/camila/Downloads/HDRIs/Newport_Loft_Ref.hdr",
-        ImageLoadOptions{.mipPolicy=MipPolicy::Generate}));
+        "hayloft_2k.hdr", ImageLoadOptions{.mipPolicy = MipPolicy::Generate}));
     HDRIIndirectLightingOptions ibl;
     ibl.mode = IrradianceMode::Compute;
-
+    GetToolBox().AddTool<EntitySystemTool>(*m_scene, [this] {});
+    GetToolBox().AddTool<Lighthouse::RendererTool>();
+    const auto imgui = composer.CreateView<Lighthouse::ImGuiView>(
+        ImGuiViewDesc{.showImguiDemo = true, .showImplotDemo = true});
+    composer.GetView<Lighthouse::ImGuiView>(imgui)->AddObject(GetToolBox());
     for (std::size_t i = 0; i < m_views.size(); ++i)
     {
       auto& view = m_renderer->CreateView(
@@ -141,14 +150,17 @@ public:
         auto& forward = view.SetRenderFeature<ForwardRenderFeature>();
         forward.AddProvider<SceneProvider>(m_store);
         forward.SetLighting<DefaultForwardLightingProvider>(m_store);
-        forward.SetEnvironmentProvider<EnvironmentProvider>(std::make_shared<HDRISkyProvider>(environment));
-        forward.SetIndirectLightingProvider<HDRIIndirectLightingProvider>(environment, ibl);
+        forward.SetEnvironmentProvider<EnvironmentProvider>(
+            std::make_shared<HDRISkyProvider>(environment));
+        forward.SetIndirectLightingProvider<HDRIIndirectLightingProvider>(
+            environment, ibl);
       }
       else
       {
         view.SetRenderFeature<EmptyRegionFeature>();
       }
     }
+
     UpdateLayout();
     SetupInput();
     m_renderer->Update(0.0f);

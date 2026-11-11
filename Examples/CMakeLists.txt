@@ -1,7 +1,6 @@
 add_executable(LighthouseGLTFLoadExample GLTFLoad/main.cpp)
 target_link_libraries(LighthouseGLTFLoadExample PRIVATE Lighthouse::Extended)
-target_compile_definitions(LighthouseGLTFLoadExample PRIVATE
-    GLTF_EXAMPLE_DEFAULT_MODEL="${CMAKE_SOURCE_DIR}/DamagedHelmet.gltf")
+#target_compile_definitions(LighthouseGLTFLoadExample PRIVATE GLTF_EXAMPLE_DEFAULT_MODEL="${CMAKE_SOURCE_DIR}/DamagedHelmet.gltf")
 
     if(TARGET Lighthouse::VulkanBackend)
     target_link_libraries(LighthouseGLTFLoadExample PRIVATE Lighthouse::VulkanBackend)
@@ -18,8 +17,7 @@ endif()
 
 add_executable(LighthouseRenderFeaturesExample RenderFeatures/main.cpp)
 target_link_libraries(LighthouseRenderFeaturesExample PRIVATE Lighthouse::Extended Lighthouse::GLFWInputBackend)
-target_compile_definitions(LighthouseRenderFeaturesExample PRIVATE
-    RENDER_FEATURES_DEFAULT_MODEL="/home/camila/Downloads/EnviromentTest/EnvironmentTest.gltf")
+#target_compile_definitions(LighthouseRenderFeaturesExample PRIVATE RENDER_FEATURES_DEFAULT_MODEL="${CMAKE_SOURCE_DIR}/DamagedHelmet.gltf")
 if(TARGET Lighthouse::VulkanBackend)
     target_link_libraries(LighthouseRenderFeaturesExample PRIVATE Lighthouse::VulkanBackend)
     target_compile_definitions(LighthouseRenderFeaturesExample PRIVATE RENDER_FEATURES_EXAMPLE_VULKAN)
