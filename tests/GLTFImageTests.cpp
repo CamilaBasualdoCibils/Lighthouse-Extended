@@ -1,22 +1,22 @@
+#include <Lighthouse/Backends/Render/OpenGL/OpenGLBackend.hpp>
+#include <Lighthouse/Backends/Render/Vulkan/VulkanBackend.hpp>
+#include <Lighthouse/Engine/Assets/Assets.hpp>
+#include <Lighthouse/Extended/Rendering/Renderer.hpp>
 #include <Lighthouse/Extended/World/Entity/Light.hpp>
 #include <Lighthouse/Extended/World/Entity/MeshRender.hpp>
 #include <Lighthouse/Extended/World/Entity/Transform.hpp>
 #include <Lighthouse/Extended/World/LightVolumes.hpp>
-#include <Lighthouse/Extended/Rendering/Renderer.hpp>
-#include <Lighthouse/Engine/Assets/Assets.hpp>
-#include <Lighthouse/Backends/Render/OpenGL/OpenGLBackend.hpp>
-#include <Lighthouse/Backends/Render/Vulkan/VulkanBackend.hpp>
 #include <array>
 #include <chrono>
 #include <cmath>
 #include <fstream>
 #include <iostream>
 #include <nlohmann/json.hpp>
-#include <source_location>
 #include <set>
+#include <source_location>
 #include <sstream>
-#include <thread>
 #include <stdexcept>
+#include <thread>
 
 using namespace Lighthouse;
 namespace
@@ -176,15 +176,21 @@ void TestTexturedWorld(std::unique_ptr<IRenderDevice> device,
     point.Add<Lighthouse::Light>(Lighthouse::Light{
         .type = Lighthouse::LightType::Point, .intensity = 0, .range = 2});
     auto secondPoint = world.CreateEntity("Second point instance");
-    secondPoint.Add<Lighthouse::Transform>().SetPos({0,0,1});
-    secondPoint.Add<Lighthouse::Light>(Lighthouse::Light{.type=Lighthouse::LightType::Point,
-        .color={0,1,0}, .intensity=0, .range=2});
+    secondPoint.Add<Lighthouse::Transform>().SetPos({0, 0, 1});
+    secondPoint.Add<Lighthouse::Light>(
+        Lighthouse::Light{.type = Lighthouse::LightType::Point,
+                          .color = {0, 1, 0},
+                          .intensity = 0,
+                          .range = 2});
     auto spot = world.CreateEntity("Spot light");
     spot.Add<Lighthouse::Transform>().SetPos({0, 0, 1});
-    spot.Add<Lighthouse::Light>(
-        Lighthouse::Light{.type = Lighthouse::LightType::Spot, .intensity = 0, .range = 2});
+    spot.Add<Lighthouse::Light>(Lighthouse::Light{
+        .type = Lighthouse::LightType::Spot, .intensity = 0, .range = 2});
     const auto material =
-        materials.Load(std::filesystem::path(__FILE__).parent_path() / "Fixtures/TexturedLit.material.json")->Instantiate(options);
+        materials
+            .Load(std::filesystem::path(__FILE__).parent_path() /
+                  "Fixtures/TexturedLit.material.json")
+            ->Instantiate(options);
     Mesh3D mesh;
     mesh.vertices = {{{-0.8f, -0.8f, 0}, {0, 0, 1}, {0, 0}},
                      {{0.8f, -0.8f, 0}, {0, 0, 1}, {1, 0}},
@@ -208,20 +214,26 @@ void TestTexturedWorld(std::unique_ptr<IRenderDevice> device,
     auto player = world.CreateEntity("Player");
     player.Add<Lighthouse::Transform>().SetPos({0, 0, 3.6f});
     player.Add<Lighthouse::CameraView>().SetResolution({128, 72});
-    Rejects([&] { player.Get<Lighthouse::CameraView>().SetResolution({0, 72}); });
+    Rejects([&]
+            { player.Get<Lighthouse::CameraView>().SetResolution({0, 72}); });
     auto secondPlayer = world.CreateEntity("Second player");
     secondPlayer.Add<Lighthouse::Transform>().SetPos({1, 0, 3.6f});
     secondPlayer.Add<Lighthouse::CameraView>().SetResolution({64, 64});
-    const auto technique = renderer.AddTechnique<Lighthouse::Renderer>(
-        &renderer, &world);
-    auto* worldRenderer = renderer.GetTechnique<Lighthouse::Renderer>(technique);
+    const auto technique =
+        renderer.AddTechnique<Lighthouse::Renderer>(&renderer, &world);
+    auto* worldRenderer =
+        renderer.GetTechnique<Lighthouse::Renderer>(technique);
     worldRenderer->SetAmbientRadiance(Vec3(0));
-    struct StageRecorder final : IRenderExtension {
+    struct StageRecorder final : IRenderExtension
+    {
       std::vector<std::pair<entt::entity, RenderStage>> calls;
-      void BuildGraph(RenderGraph& graph, RenderStage stage, RenderContext& context) override {
+      void BuildGraph(RenderGraph& graph, RenderStage stage,
+                      RenderContext& context) override
+      {
         Check(&graph == &context.technique.graph);
         Check(context.buildId > 0);
-        if (stage != RenderStage::BeforeGeometry) Check(context.gbuffer.depth != kInvalidGraphResource);
+        if (stage != RenderStage::BeforeGeometry)
+          Check(context.gbuffer.depth != kInvalidGraphResource);
         calls.emplace_back(context.cameraEntity, stage);
       }
     };
@@ -262,30 +274,41 @@ void TestTexturedWorld(std::unique_ptr<IRenderDevice> device,
               {
                 Check(player.Get<Lighthouse::CameraView>().GetOutput() !=
                       secondPlayer.Get<Lighthouse::CameraView>().GetOutput());
-                data.image = builder.Read(player.Get<Lighthouse::CameraView>().GetOutput());
-                data.secondImage = builder.Read(secondPlayer.Get<Lighthouse::CameraView>().GetOutput());
+                data.image = builder.Read(
+                    player.Get<Lighthouse::CameraView>().GetOutput());
+                data.secondImage = builder.Read(
+                    secondPlayer.Get<Lighthouse::CameraView>().GetOutput());
                 data.output = builder.Write(target);
                 builder.SetSideEffect();
               },
               [&](const Readback& data, FrameGraphPassResources& resources,
                   RenderGraphExecutePassContext& execute)
               {
-                const auto& firstDesc = resources.getDescriptor<RenderGraphImage>(data.image);
-                const auto& secondDesc = resources.getDescriptor<RenderGraphImage>(data.secondImage);
-                const auto expected = secondPlayer.Get<Lighthouse::CameraView>().GetResolution();
+                const auto& firstDesc =
+                    resources.getDescriptor<RenderGraphImage>(data.image);
+                const auto& secondDesc =
+                    resources.getDescriptor<RenderGraphImage>(data.secondImage);
+                const auto expected =
+                    secondPlayer.Get<Lighthouse::CameraView>().GetResolution();
                 Check(firstDesc.width == 128 && firstDesc.height == 72);
-                Check(secondDesc.width == expected.x && secondDesc.height == expected.y);
+                Check(secondDesc.width == expected.x &&
+                      secondDesc.height == expected.y);
                 const BlitRegion region{
                     .srcSubresource = {ImageAspect::Color, 0, 0, 1},
                     .srcOffsets = {{{0, 0, 0}, {128, 72, 1}}},
                     .dstSubresource = {ImageAspect::Color, 0, 0, 1},
                     .dstOffsets = {{{0, 0, 0}, {128, 72, 1}}}};
-                execute.commandList->Begin();
+                execute.commandList->MemoryBarrier(
+                    {.srcStageMask = {PipelineStage::ColorAttachmentOutput,
+                                      PipelineStage::Transfer},
+                     .srcAccessMask = {PipelineAccess::ColorAttachmentWrite,
+                                       PipelineAccess::TransferWrite},
+                     .dstStageMask = PipelineStage::Transfer,
+                     .dstAccessMask = PipelineAccess::TransferRead});
                 execute.commandList->BlitImage(
                     resources.get<RenderGraphImage>(data.image).handle,
                     resources.get<ImportedRenderGraphImage>(data.output).handle,
                     region, ImageFilter::Nearest);
-                execute.commandList->End();
               });
         });
     renderer.Compile();
@@ -359,7 +382,8 @@ void TestTexturedWorld(std::unique_ptr<IRenderDevice> device,
       renderer.Render();
       pixels = gpu->ReadImage(output);
     };
-    const auto changeMaterial = [&](const Lighthouse::MaterialLoadOptions& changed)
+    const auto changeMaterial =
+        [&](const Lighthouse::MaterialLoadOptions& changed)
     {
       entity.Get<Lighthouse::MeshRender>().material =
           material->material->Instantiate(changed);
@@ -377,15 +401,16 @@ void TestTexturedWorld(std::unique_ptr<IRenderDevice> device,
     render();
     const int pointRed = component(74, 0);
     Check(pointRed > 10);
-    const auto pointGreen = component(74,1);
+    const auto pointGreen = component(74, 1);
     secondPoint.Get<Lighthouse::Light>().intensity = 0.3f;
     render();
-    Check(std::abs(component(74,0)-pointRed) <= 1);
-    Check(component(74,1) > pointGreen);
+    Check(std::abs(component(74, 0) - pointRed) <= 1);
+    Check(component(74, 1) > pointGreen);
     secondPoint.Get<Lighthouse::Light>().enabled = false;
     point.Get<Lighthouse::Light>().type = Lighthouse::LightType::Spot;
     render();
-    Check(component(74,0) > 10); // Live shape changes update the indirect batches.
+    Check(component(74, 0) >
+          10); // Live shape changes update the indirect batches.
     point.Get<Lighthouse::Light>().type = Lighthouse::LightType::Point;
     point.Get<Lighthouse::Light>().range = 4; // Camera is inside the sphere.
     render();
@@ -415,7 +440,8 @@ void TestTexturedWorld(std::unique_ptr<IRenderDevice> device,
     render();
     Check(component(74, 0) == 0); // Outside the spotlight cone.
     spot.Get<Lighthouse::Transform>().SetRotEuler({0, 0, 0});
-    spot.Get<Lighthouse::Light>().innerAngle = spot.Get<Lighthouse::Light>().outerAngle;
+    spot.Get<Lighthouse::Light>().innerAngle =
+        spot.Get<Lighthouse::Light>().outerAngle;
     render();
     Check(component(74, 0) > 10); // Equal angles form a hard edge, not NaNs.
     spot.Get<Lighthouse::Light>().enabled = false;
@@ -492,7 +518,7 @@ int main()
   {
     const auto& mesh = volumes[shape];
     Check(mesh.indices.size() > 30);
-    for (size_t i=0; i<mesh.indices.size(); i+=3)
+    for (size_t i = 0; i < mesh.indices.size(); i += 3)
     {
       const auto a = mesh.vertices.at(mesh.indices[i]).position;
       const auto b = mesh.vertices.at(mesh.indices[i + 1]).position;
