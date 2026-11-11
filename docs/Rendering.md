@@ -7,16 +7,18 @@ There is no renderer-wide draw batch.
 
 This implementation provides interfaces, typed provider ownership, update calls,
 graph assembly, destination mapping, and configuration lifetime management.
-Deferred/forward shading, light assignment, reflection/shadow algorithms,
-ray dispatch, denoising, tone mapping and output conversion are **not implemented**.
-The existing resource system and `ResourceRequests` stubs are unchanged.
+Forward rendering now includes a scene provider, shared `SceneRenderStore`, glTF
+metallic/roughness material textures, scene-component lighting, depth attachments,
+and SDR tone mapping/output resolve. Deferred/path-tracing rendering, clustered
+light assignment, shadows and reflections remain scaffolds. `ResourceRequests`
+remains a stub; scene allocations are cached in the shared store, not in it.
 
 ## One view
 
 ```cpp
 auto rendererRef = composer.AddTechnique<Renderer>(&composer);
 auto& renderer = *composer.GetTechnique<Renderer>(rendererRef);
-auto sceneData = std::make_shared<SceneRenderData>(scene);
+auto sceneData = std::make_shared<SceneRenderStore>(scene);
 auto& view = renderer.CreateView(std::make_shared<WindowRenderOutput>(window));
 view.SetViewFamily({{RenderViewData{.id = 1}}});
 auto& deferred = view.SetRenderFeature<DeferredRenderFeature>();
@@ -64,7 +66,7 @@ fail graph construction. Feature-specific effects have typed contexts and cannot
 be installed on incompatible features. Auxiliary outputs must document their
 encoding/space; names alone do not make arbitrary implementations interchangeable.
 
-Scene adapters can share `SceneRenderData`, retaining scene change tracking across
+Scene adapters can share `SceneRenderStore`, retaining scene change tracking across
 views and feature changes. Each provider owns its batching/render implementation;
 custom providers can own different data layouts, resources and command recording.
 `IRenderPreparationProvider` is for generation/residency passes needed before the
@@ -73,8 +75,19 @@ graph, with explicit reads/writes. Composite providers can read depth, GBuffer o
 lit color as appropriate. Transparency ordering across providers is the responsibility
 of their composition implementation.
 
-Scene raster adapters currently extract data but add no drawing passes. The ray
-adapter contributes instance descriptions only; it builds no acceleration structures.
+`SceneProvider` (also named `SceneForwardRenderProvider`) records forward draws
+using pipelines and binding layouts supplied by the feature. `DefaultForwardLightingProvider`
+extracts enabled directional, point and spot `Light` components, including parent
+transforms. The initial implementation uses up to 256 unshadowed lights, PNG/JPEG
+textures, UV set zero and a single uploaded mip level. The default output resolver
+supports SDR sRGB destinations. Deferred geometry and ray tracing remain stubs.
+
+`Resource::LoadScene(path)` parses a scene resource. `resource.GetDefaultScene()`
+instantiates its default scene. Those operations remain CPU-side; the shared render store resolves
+referenced meshes and images when the scene provider builds its rendering passes.
+
+The RenderFeatures example uses this flow to display DamagedHelmet in its top-left
+quadrant, with three ordinary scene light entities. Other quadrants remain empty.
 
 ## Outputs and multiple views
 
@@ -116,3 +129,40 @@ The previous compiled graph retains its feature, providers and output objects un
 that graph is replaced. Graph construction waits for prior GPU work before retirement.
 This is intentionally conservative; fine-grained asynchronous retirement can replace
 that wait later. Shared resource handles remain alive independently of feature choice.
+
+## Shared material compilation
+
+All surface rendering uses the existing `Materials`, `Material`, `MaterialInstance`
+and `ShadingModel` system. Features select a compilation target; they do not define
+an alternative surface-material language or parameter layout:
+
+```cpp
+auto material = materials.Load("materials/MySurface.material.json");
+auto forward = material->Compile(MaterialRenderPath::Forward, lightingSource);
+auto deferred = material->Compile(MaterialRenderPath::Deferred);
+auto ray = material->Compile(MaterialRenderPath::RayTracing);
+```
+
+Each target uses the same material source, parameter schema, texture sampling API,
+and `evaluateMaterial()` function. Lit shares its surface-response library between
+forward and deferred lighting. Unlit bypasses incident lighting. The forward lighting
+provider supplies `ForwardLightCount`, `ForwardLightAt`, `ForwardAmbientRadiance`,
+and its set-2 incident-light buffer, rather than implementing the material's BSDF.
+
+`materials/GltfPBR.material.json` is an ordinary Lit material definition. The scene
+store translates imported factors and resolved textures into its regular material
+instance options. It contains no separate forward surface evaluator. Custom authored
+materials can be assigned to scene instances through a CPU resource handle:
+
+```cpp
+auto material = MaterialResource::FromDefinition("materials/MySurface.material.json",
+    {{"color", Vec4(0.8f, 0.2f, 0.1f, 1.0f)}});
+material.SetTexture("albedo", Resource::LoadTexture("albedo.png"));
+entity.Get<MeshRender>().material = material;
+```
+
+CPU shader compilation for the ray target is independent of device RT support.
+Creating a native material ray pipeline remains capability-gated. The current hit
+library retains its existing color-payload/placeholder attribute contract; a complete
+path tracer, real hit-attribute bindings and ray lighting/integration are not supplied
+by this material compilation change.

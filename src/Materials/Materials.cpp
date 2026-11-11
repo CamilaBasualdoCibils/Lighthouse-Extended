@@ -151,7 +151,7 @@ Materials::LoadShadingModel(SurfaceModel model)
         Detail::ResourceText(Detail::EmbeddedPath(
                    "materials/passes/Lit.deferred.EvaluateLight.glsl")) +
         "\n" +
-        Detail::ResourceText(Detail::EmbeddedPath( "materials/passes/Lit.deferred.BRDF.glsl")) +
+        Detail::ResourceText(Detail::EmbeddedPath( "materials/passes/Lit.BRDF.glsl")) +
         "\n";
   lightingSource += Detail::ResourceText(Detail::EmbeddedPath("materials/passes/" + base + ".deferred.frag.glsl"));
   shading->m_fragment = m_device.CreateShaderModule(ShaderCompiler::Compile(
@@ -239,20 +239,14 @@ Materials::Load(const std::filesystem::path& path)
       definition.declarations + "\n#line 1 1\n" + Detail::ResourceText(definition.shader);
   try
   {
-    const auto vertex = ShaderCompiler::Compile(
-        Detail::ResourceText(Detail::EmbeddedPath(
-                   "materials/passes/Shared.gbuffer.vert.glsl")),
-        {.stage = ShaderStage::Vertex});
-    const auto fragment = ShaderCompiler::Compile(
-        "#version 450\n" + material->source + "\n#line 1 2\n" +
-            Detail::ResourceText(Detail::EmbeddedPath(
-                       ("materials/passes/" + base + ".gbuffer.frag.glsl"))),
-        {.stage = ShaderStage::Fragment});
+    const auto compiled = material->Compile(MaterialRenderPath::Deferred);
+    const auto& vertex = *compiled.vertex;
+    const auto& fragment = *compiled.fragment;
     material->frameLayout = m_device.CreateDescriptorSetLayout(
         {.bindings = {{.binding = 0,
                        .type = DescriptorType::UniformBuffer,
                        .count = 1,
-                       .stages = ShaderStageFlags::Vertex}}});
+                       .stages = ShaderStageFlags::Vertex | ShaderStageFlags::Fragment}}});
     const bool rayTracing = m_device.GetCapabilities().rayTracing;
     const auto stages =
         rayTracing ? ShaderStageFlags::Fragment | ShaderStageFlags::ClosestHit
@@ -305,13 +299,8 @@ Materials::Load(const std::filesystem::path& path)
 
     if (m_device.GetCapabilities().rayTracing)
     {
-      const auto hit = ShaderCompiler::Compile(
-          "#version 460\n#extension GL_EXT_ray_tracing : require\n#define "
-          "EESG_RAY_TRACING\n" +
-              material->source + "\n#line 1 2\n" +
-              Detail::ResourceText(Detail::EmbeddedPath(
-                         ("materials/passes/" + base + ".rchit.glsl"))),
-          {.stage = ShaderStage::ClosestHit});
+      const auto ray = material->Compile(MaterialRenderPath::RayTracing);
+      const auto& hit = *ray.closestHit;
       material->m_rayLayout = m_device.CreatePipelineLayout(
           {.sets = {material->frameLayout, material->parametersLayout}});
       const auto pipeline = m_device.CreateRayTracingPipeline(

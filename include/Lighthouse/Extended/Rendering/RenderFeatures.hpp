@@ -11,16 +11,24 @@ struct DeferredRenderContext
   RenderFeatureResult output;
   std::vector<RenderGraphResource> lights, shadows, reflections;
 };
+class ForwardRenderServices;
 struct ForwardRenderContext
 {
   RenderFeatureContext& frame;
   RenderFeatureResult output;
   std::vector<RenderGraphResource> lights, shadows, reflections, lightAssignments;
+  // Incident-light shader declares set 2/binding 0; surface response belongs to Materials.
+  std::string lightingShader;
+  BufferHandle lightingBuffer{};
+  std::shared_ptr<ForwardRenderServices> rendering;
 };
 struct RayGeometryInstance
 {
   RenderObjectHandle mesh{}, material{};
   Mat4 worldTransform{1.0f};
+  // Preserve the authored material/mesh definitions for the scene ray pipeline.
+  ModelHandle sourceMesh;
+  MaterialHandle sourceMaterial;
 };
 struct RaySceneData
 {
@@ -47,7 +55,14 @@ LIGHTHOUSE_RENDER_PROVIDER(IDeferredReflectionProvider, DeferredRenderContext);
 LIGHTHOUSE_RENDER_PROVIDER(IDeferredCompositeProvider, DeferredRenderContext);
 LIGHTHOUSE_RENDER_PROVIDER(IDeferredPostProcess, DeferredRenderContext);
 LIGHTHOUSE_RENDER_PROVIDER(IForwardGeometryProvider, ForwardRenderContext);
-LIGHTHOUSE_RENDER_PROVIDER(IForwardLightingProvider, ForwardRenderContext);
+class IForwardLightingProvider : public IRenderProvider
+{
+public:
+  // Publish graph dependencies, a storage buffer at set 2/binding 0, and GLSL
+  // implementing ForwardLightCount/ForwardLightAt/ForwardAmbientRadiance.
+  // Geometry providers consume feature-created pipelines; they do not shade lights.
+  virtual void BuildGraph(ForwardRenderContext&) = 0;
+};
 LIGHTHOUSE_RENDER_PROVIDER(IForwardShadowProvider, ForwardRenderContext);
 LIGHTHOUSE_RENDER_PROVIDER(IForwardReflectionProvider, ForwardRenderContext);
 LIGHTHOUSE_RENDER_PROVIDER(IForwardLightAssignmentProvider, ForwardRenderContext);
@@ -61,8 +76,8 @@ LIGHTHOUSE_RENDER_PROVIDER(IPathTracingCompositeProvider, PathTracingRenderConte
 LIGHTHOUSE_RENDER_PROVIDER(IPathTracingPostProcess, PathTracingRenderContext);
 #undef LIGHTHOUSE_RENDER_PROVIDER
 
-// These classes only orchestrate contracts. No geometry, lighting, ray dispatch,
-// output conversion or post-processing algorithms are implemented here.
+// Features orchestrate providers. Forward uses the shared material system; deferred
+// and path-tracing rendering algorithms remain scaffolds.
 class DeferredRenderFeature : public RenderFeatureBase
 {
 public:
@@ -103,11 +118,14 @@ public:
   T& AddCompositor(Args&&... args) { return Add<T>(m_compositors, std::forward<Args>(args)...); }
   template<class T, class... Args> requires std::derived_from<T, IForwardPostProcess>
   T& AddForwardPostProcess(Args&&... args) { return Add<T>(m_post, std::forward<Args>(args)...); }
+  std::uint64_t GetConfigurationRevision() const noexcept override;
   void Update(RenderUpdateContext&) override;
   RenderFeatureResult BuildGraph(RenderFeatureContext&) override;
 protected:
+  void ResolveDefault(RenderFeatureContext&, RenderFeatureResult&) override;
   virtual void BuildLightAssignment(ForwardRenderContext&) {}
 private:
+  std::shared_ptr<ForwardRenderServices> m_rendering;
   std::vector<std::shared_ptr<IForwardGeometryProvider>> m_geometry;
   std::shared_ptr<IForwardLightingProvider> m_lighting;
   std::shared_ptr<IForwardShadowProvider> m_shadows;

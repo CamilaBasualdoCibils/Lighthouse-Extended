@@ -35,6 +35,7 @@ class IRenderProvider
 {
 public:
   virtual ~IRenderProvider() = default;
+  virtual std::uint64_t GetConfigurationRevision() const noexcept { return 0; }
   virtual void Update(RenderUpdateContext&) {}
 };
 class IRenderPreparationProvider : public IRenderProvider
@@ -103,6 +104,7 @@ protected:
   { if (value) context.keepAlive.push_back(value); }
   void Prepare(RenderFeatureContext&);
   void Finish(RenderFeatureContext&, RenderFeatureResult&);
+  virtual void ResolveDefault(RenderFeatureContext&, RenderFeatureResult&) {}
 private:
   std::uint64_t m_revision{};
   std::vector<std::shared_ptr<IRenderPreparationProvider>> m_preparation;

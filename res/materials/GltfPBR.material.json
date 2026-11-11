@@ -1,0 +1,21 @@
+{
+  "base": "Lit",
+  "shader": "GltfPBR.glsl",
+  "parameters": {
+    "baseColorFactor": {"type": "vec4", "default": [1, 1, 1, 1]},
+    "emissiveFactor": {"type": "vec3", "default": [0, 0, 0]},
+    "metallicFactor": {"type": "float", "default": 1},
+    "roughnessFactor": {"type": "float", "default": 1},
+    "normalScale": {"type": "float", "default": 1},
+    "occlusionStrength": {"type": "float", "default": 1},
+    "alphaMode": {"type": "int", "default": 0},
+    "alphaCutoff": {"type": "float", "default": 0.5},
+    "doubleSided": {"type": "bool", "default": false},
+    "hasNormal": {"type": "bool", "default": false},
+    "baseColor": {"type": "texture2D"},
+    "metallicRoughness": {"type": "texture2D"},
+    "normal": {"type": "texture2D"},
+    "occlusion": {"type": "texture2D"},
+    "emissive": {"type": "texture2D"}
+  }
+}

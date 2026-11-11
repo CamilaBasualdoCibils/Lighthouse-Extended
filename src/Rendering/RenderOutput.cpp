@@ -47,6 +47,6 @@ RenderOutputTargets WindowRenderOutput::BuildTargets(TechniqueBuildContext& ctx,
   case SwapchainFormat::HDR10: encoding = RenderColorEncoding::BT2020PQ; break;
   }
   return {{family.views.front().id, window->GetAcquiredImageAsRGResource(), 0, 0,
-           region, info.imageFormat, encoding}};
+           region, info.imageFormat, encoding, RenderTargetKind::Window}};
 }
 } // namespace Lighthouse

@@ -12,6 +12,7 @@ struct RenderViewport
   std::uint32_t x{}, y{}, width{}, height{};
 };
 enum class RenderColorEncoding { SceneLinear, SRGB, DisplayLinear, BT2020PQ };
+enum class RenderTargetKind { Image, ImportedImage, Window };
 struct RenderOutputTarget
 {
   RenderViewID view{};
@@ -20,6 +21,7 @@ struct RenderOutputTarget
   RenderViewport viewport;
   ImageFormat format{ImageFormat::RGBA8};
   RenderColorEncoding encoding{RenderColorEncoding::SRGB};
+  RenderTargetKind kind{RenderTargetKind::Image};
 };
 using RenderOutputTargets = std::vector<RenderOutputTarget>;
 void ValidateRenderTargets(const RenderViewFamily&, std::span<const RenderOutputTarget>);

@@ -1,5 +1,6 @@
 #pragma once
 #include <Lighthouse/Extended/Resources/Texture.hpp>
+#include <Lighthouse/Extended/Materials/Materials.hpp>
 #include <map>
 #include <string>
 namespace Lighthouse
@@ -13,7 +14,12 @@ struct OwnedMaterial
 {
   MaterialAsset data;
 };
-using MaterialSource = std::variant<GLTFMaterial, OwnedMaterial>;
+struct DefinedMaterial
+{
+  std::filesystem::path path;
+  std::map<std::string, MaterialValue> parameters;
+};
+using MaterialSource = std::variant<GLTFMaterial, OwnedMaterial, DefinedMaterial>;
 class MaterialResource : public ResourceDetail::Handle<MaterialSource>
 {
 public:
@@ -38,6 +44,12 @@ public:
   static MaterialResource FromData(MaterialAsset data = {})
   {
     return MaterialResource(OwnedMaterial{std::move(data)});
+  }
+  static MaterialResource FromDefinition(std::filesystem::path path,
+      std::map<std::string, MaterialValue> parameters = {})
+  {
+    if (path.empty()) throw std::invalid_argument("Material definition requires a path");
+    return MaterialResource(DefinedMaterial{std::move(path), std::move(parameters)});
   }
   void SetTexture(std::string name, TextureResource texture)
   {

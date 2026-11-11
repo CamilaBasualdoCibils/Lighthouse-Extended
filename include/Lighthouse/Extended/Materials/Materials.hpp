@@ -27,6 +27,12 @@ enum class SurfaceModel
 };
 BOOST_DESCRIBE_ENUM(Lighthouse::SurfaceModel, Unlit, Lit)
 
+enum class MaterialRenderPath { Forward, Deferred, RayTracing };
+struct CompiledMaterialShaders
+{
+  std::optional<Shader> vertex, fragment, closestHit;
+};
+
 using MaterialValue =
     std::variant<float, int32_t, uint32_t, bool, Lighthouse::Vec2,
                  Lighthouse::Vec3, Lighthouse::Vec4>;
@@ -128,6 +134,10 @@ struct Material : std::enable_shared_from_this<Material>
   Material& operator=(const Material&) = delete;
   std::shared_ptr<const MaterialInstance>
   Instantiate(const MaterialLoadOptions& options = {}) const;
+  // All targets use the same surface model, parameters and evaluateMaterial().
+  // Ray shader compilation does not require a device with ray-tracing support.
+  CompiledMaterialShaders Compile(MaterialRenderPath path,
+                                  std::string_view lightingSource = {}) const;
 
   SurfaceModel model = SurfaceModel::Unlit;
   std::shared_ptr<const ShadingModel> shadingModel;

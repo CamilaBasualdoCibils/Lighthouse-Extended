@@ -1,0 +1,8 @@
+{
+  "base": "Lit",
+  "shader": "SharedSurface.glsl",
+  "parameters": {
+    "color": {"type": "vec4", "default": [0.8, 0.1, 0.05, 1]},
+    "emission": {"type": "vec3", "default": [0.2, 0.03, 0.01]}
+  }
+}

@@ -8,13 +8,24 @@
 
 namespace Lighthouse
 {
-// Shared extraction state for adapters of the same scene. No GPU resource loader.
-// Scene must outlive this state. Each provider can retain its own specialized batches.
-class SceneRenderData
+// Shared scene extraction and per-device mesh/image/material allocation cache.
+// Scene and render devices must outlive this store. Providers own their specialized
+// pipelines, batches and view-dependent bindings.
+class SceneRenderStore
 {
 public:
-  explicit SceneRenderData(Scene& scene);
+  explicit SceneRenderStore(Scene& scene);
+  ~SceneRenderStore();
   void Update(RenderUpdateContext&);
+  std::uint64_t GetRevision() const noexcept { return m_revision; }
+  Scene& GetScene() const noexcept { return *m_world; }
+  Mat4 GetWorldMatrix(entt::entity entity) const;
+  struct Instance { entt::entity entity; ModelHandle mesh; MaterialHandle material; Mat4 transform; };
+  std::vector<Instance> GetInstances() const;
+  std::shared_ptr<struct SceneMeshGPU> GetMesh(IRenderDevice&, const ModelHandle&);
+  std::shared_ptr<struct SceneMaterialGPU> GetMaterial(IRenderDevice&, const MaterialHandle&);
+  struct GPUCache;
+
   const DrawCollector& GetDraws() const noexcept { return m_draws; }
 private:
   void CollectResources(ResourceRequests&);
@@ -30,6 +41,8 @@ private:
     DrawInstanceHandle instance{};
     bool dirty{true};
   };
+  std::uint64_t m_revision{};
+  std::unique_ptr<GPUCache> m_gpu;
   Scene* m_world;
   DrawCollector m_draws;
   std::unordered_map<entt::entity, SceneDraw> m_sceneDraws;
@@ -38,35 +51,40 @@ private:
   std::uint64_t m_lastFrame{};
   bool m_updated{};
 };
+using SceneRenderData = SceneRenderStore;
+
 class SceneDeferredRenderProvider : public IDeferredGeometryProvider
 {
 public:
-  explicit SceneDeferredRenderProvider(std::shared_ptr<SceneRenderData> scene) : m_scene(std::move(scene))
+  explicit SceneDeferredRenderProvider(std::shared_ptr<SceneRenderStore> scene) : m_scene(std::move(scene))
   { if (!m_scene) throw std::invalid_argument("Null scene render data"); }
   void Update(RenderUpdateContext& ctx) override { m_scene->Update(ctx); }
   void BuildGraph(DeferredRenderContext&) override {} // Raster rendering intentionally deferred.
-  const SceneRenderData& GetSceneData() const { return *m_scene; }
+  const SceneRenderStore& GetSceneData() const { return *m_scene; }
 private:
-  std::shared_ptr<SceneRenderData> m_scene;
+  std::shared_ptr<SceneRenderStore> m_scene;
 };
 class SceneForwardRenderProvider : public IForwardGeometryProvider
 {
 public:
-  explicit SceneForwardRenderProvider(std::shared_ptr<SceneRenderData> scene) : m_scene(std::move(scene))
+  explicit SceneForwardRenderProvider(std::shared_ptr<SceneRenderStore> scene) : m_scene(std::move(scene))
   { if (!m_scene) throw std::invalid_argument("Null scene render data"); }
   void Update(RenderUpdateContext& ctx) override { m_scene->Update(ctx); }
-  void BuildGraph(ForwardRenderContext&) override {} // Also usable by ForwardPlusRenderFeature.
+  std::uint64_t GetConfigurationRevision() const noexcept override { return m_scene->GetRevision(); }
+  void BuildGraph(ForwardRenderContext&) override; // Also usable by ForwardPlusRenderFeature.
 private:
-  std::shared_ptr<SceneRenderData> m_scene;
+  std::shared_ptr<SceneRenderStore> m_scene;
 };
 class SceneRaytracedRenderProvider : public IRaySceneProvider
 {
 public:
-  explicit SceneRaytracedRenderProvider(std::shared_ptr<SceneRenderData> scene) : m_scene(std::move(scene))
+  explicit SceneRaytracedRenderProvider(std::shared_ptr<SceneRenderStore> scene) : m_scene(std::move(scene))
   { if (!m_scene) throw std::invalid_argument("Null scene render data"); }
   void Update(RenderUpdateContext& ctx) override { m_scene->Update(ctx); }
   void BuildGraph(PathTracingRenderContext&) override;
 private:
-  std::shared_ptr<SceneRenderData> m_scene;
+  std::shared_ptr<SceneRenderStore> m_scene;
 };
 } // namespace Lighthouse
+
+namespace Lighthouse { using SceneProvider = SceneForwardRenderProvider; }

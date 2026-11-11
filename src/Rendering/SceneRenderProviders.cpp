@@ -4,8 +4,7 @@
 #include <functional>
 namespace Lighthouse
 {
-SceneRenderData::SceneRenderData(Scene& scene) : m_world(&scene) {}
-void SceneRenderData::Update(RenderUpdateContext& context)
+void SceneRenderStore::Update(RenderUpdateContext& context)
 {
   if (m_updated && m_lastResources == &context.resources && m_lastFrame == context.frameId) return;
   CollectResources(context.resources);
@@ -14,7 +13,7 @@ void SceneRenderData::Update(RenderUpdateContext& context)
   m_lastFrame = context.frameId;
   m_updated = true;
 }
-void SceneRenderData::CollectResources(ResourceRequests& requests)
+void SceneRenderStore::CollectResources(ResourceRequests& requests)
 {
   auto& registry = m_world->Registry();
   std::unordered_set<entt::entity> present, visiting;
@@ -43,6 +42,7 @@ void SceneRenderData::CollectResources(ResourceRequests& requests)
     {
       cached.mesh = mesh.mesh;
       cached.meshRevision = mesh.mesh.GetRevision();
+      ++m_revision;
       cached.renderMesh = mesh.mesh ? requests.LoadMesh(mesh.mesh) : RenderObjectHandle{};
       cached.dirty = true;
     }
@@ -56,6 +56,7 @@ void SceneRenderData::CollectResources(ResourceRequests& requests)
       cached.material = mesh.material;
       cached.materialRevision = mesh.material.GetRevision();
       cached.textures = std::move(textures);
+      ++m_revision;
       cached.renderMaterial = mesh.material ? requests.LoadMaterial(mesh.material) : RenderObjectHandle{};
       if (mesh.material)
         for (const auto& [_, texture] : mesh.material.GetTextures()) requests.LoadTexture(texture);
@@ -71,11 +72,12 @@ void SceneRenderData::CollectResources(ResourceRequests& requests)
   {
     if (present.contains(it->first)) { ++it; continue; }
     if (it->second.instance) m_removedDraws.push_back(it->second.instance);
+    ++m_revision;
     it = m_sceneDraws.erase(it);
   }
 }
 
-void SceneRenderData::CollectDraws(DrawCollector& draws)
+void SceneRenderStore::CollectDraws(DrawCollector& draws)
 {
   for (const auto handle : m_removedDraws) draws.Remove(handle);
   m_removedDraws.clear();
@@ -93,8 +95,7 @@ void SceneRenderData::CollectDraws(DrawCollector& draws)
 
 void SceneRaytracedRenderProvider::BuildGraph(PathTracingRenderContext& context)
 {
-  for (const auto& [_, draw] : m_scene->GetDraws().GetInstances())
-    if (draw.visible)
-      context.scene.instances.push_back({draw.mesh, draw.material, draw.worldTransform});
+  for (const auto& instance : m_scene->GetInstances())
+    context.scene.instances.push_back({{}, {}, instance.transform, instance.mesh, instance.material});
 }
 } // namespace Lighthouse

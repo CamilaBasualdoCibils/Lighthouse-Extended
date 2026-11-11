@@ -1,4 +1,4 @@
-// Linear metallic/roughness surface contract; evaluated during G-buffer fill.
+// Shared linear metallic/roughness surface contract for forward, deferred and ray targets.
 struct SurfaceInput { vec3 position; vec3 normal; vec2 uv; };
 struct LitSurface {
     vec3 color;

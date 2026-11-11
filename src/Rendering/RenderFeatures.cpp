@@ -1,4 +1,5 @@
 #include <Lighthouse/Extended/Rendering/RenderFeatures.hpp>
+#include <Lighthouse/Extended/Rendering/ForwardRendering.hpp>
 
 namespace Lighthouse
 {
@@ -50,6 +51,7 @@ void RenderFeatureBase::Finish(RenderFeatureContext& ctx, RenderFeatureResult& r
     Hold(ctx, m_resolver);
     result.color = m_resolver->BuildGraph(ctx, result);
   }
+  else ResolveDefault(ctx, result);
   ValidateRenderTargets(*ctx.family, result.color);
   // Graph versions can change, but destination subresources and their encoding cannot.
   for (std::size_t i = 0; i < result.color.size(); ++i)
@@ -98,12 +100,25 @@ RenderFeatureResult ForwardRenderFeature::BuildGraph(RenderFeatureContext& frame
   BuildOne(m_shadows, ctx);
   BuildOne(m_lighting, ctx);
   BuildLightAssignment(ctx);
+  m_rendering=std::make_shared<ForwardRenderServices>(frame.technique.device,ctx.lightingShader);
+  ctx.rendering=m_rendering; Hold(frame,m_rendering);
   BuildAll(m_geometry, ctx);
   BuildOne(m_reflections, ctx);
   BuildAll(m_compositors, ctx);
   BuildAll(m_post, ctx);
   Finish(frame, ctx.output);
   return std::move(ctx.output);
+}
+std::uint64_t ForwardRenderFeature::GetConfigurationRevision() const noexcept
+{
+  auto revision=RenderFeatureBase::GetConfigurationRevision();
+  for(const auto& provider:m_geometry)revision=revision*1099511628211ull ^ provider->GetConfigurationRevision();
+  return revision;
+}
+void ForwardRenderFeature::ResolveDefault(RenderFeatureContext& frame,RenderFeatureResult& result)
+{
+  if(m_rendering && !result.color.empty() && result.color.front().encoding==RenderColorEncoding::SceneLinear)
+    m_rendering->Resolve(frame,result);
 }
 void ForwardPlusRenderFeature::Update(RenderUpdateContext& ctx)
 { ForwardRenderFeature::Update(ctx); UpdateOne(m_assignment, ctx); }
