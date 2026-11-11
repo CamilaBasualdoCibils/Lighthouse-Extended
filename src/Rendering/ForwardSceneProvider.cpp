@@ -65,7 +65,7 @@ void SceneForwardRenderProvider::BuildGraph(ForwardRenderContext& ctx)
     };
     const auto color = ctx.output.color[view].image;
     const auto depth =
-        ctx.output.auxiliary.at(RenderSemantic::Depth)[view].image;
+        ctx.output.auxiliary.at(ForwardSemantics::Depth)[view].image;
     const auto& pass = ctx.frame.technique.graph.AddPass<Data>(
         "Forward scene geometry",
         [color, depth, draws = std::move(draws),
@@ -161,7 +161,7 @@ void SceneForwardRenderProvider::BuildGraph(ForwardRenderContext& ctx)
           commands.EndRendering();
         });
     ctx.output.color[view].image = pass.color;
-    ctx.output.auxiliary[RenderSemantic::Depth][view].image = pass.depth;
+    ctx.output.auxiliary[ForwardSemantics::Depth][view].image = pass.depth;
   }
 }
 } // namespace Lighthouse

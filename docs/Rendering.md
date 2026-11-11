@@ -60,17 +60,27 @@ history inside each feature/provider; switching features creates a new instance.
 - `PathTracingRenderFeature`: multiple `IRaySceneProvider`s, light sampling,
   integrator, denoiser, compositors and path-tracing-specific post-processes.
 
-Common `IRenderPostProcess` effects run after feature-specific effects and before
-the output resolver. They can declare required auxiliary inputs; missing inputs
-fail graph construction. Feature-specific effects have typed contexts and cannot
-be installed on incompatible features. Auxiliary outputs must document their
-encoding/space; names alone do not make arbitrary implementations interchangeable.
+All three concrete features implement `IRenderFeature` directly and own their
+provider stages, revision aggregation and execution lifetimes. Forward providers
+virtually inherit `IForwardProvider`; deferred providers virtually inherit
+`IDeferredProvider`. Both roots virtually inherit `IRenderProvider`, so a class
+supporting both techniques has one common provider subobject.
+
+`IForwardPostProcess::BuildGraphForward(ForwardRenderContext&)` runs after forward
+compositors and before the feature's final tone mapping/output resolution.
+`IDeferredPostProcess::BuildGraphDeferred(DeferredRenderContext&)` is the separate
+deferred contract. Deferred providers declare attachment/history requirements with
+`GetDeferredDependencies()`. Missing post-process requirements fail graph building.
+`ForwardSemantics` and `DeferredSemantics` describe independent auxiliary maps;
+deferred temporal history is a separate map keyed by `DeferredHistory`. No feature
+promises another technique's outputs. Deferred and path-tracing features retain
+their orchestration scaffolds; this does not add their rendering implementations.
 
 Scene adapters can share `SceneRenderStore`, retaining scene change tracking across
 views and feature changes. Each provider owns its batching/render implementation;
 custom providers can own different data layouts, resources and command recording.
-`IRenderPreparationProvider` is for generation/residency passes needed before the
-feature builds its geometry. Providers add custom passes through the supplied
+`IForwardPreparationProvider` and `IDeferredPreparationProvider` are separate
+contracts for generation/residency passes before their feature builds geometry. Providers add custom passes through the supplied
 graph, with explicit reads/writes. Composite providers can read depth, GBuffer or
 lit color as appropriate. Transparency ordering across providers is the responsibility
 of their composition implementation.
@@ -88,16 +98,42 @@ referenced meshes and images when the scene provider builds its rendering passes
 
 The RenderFeatures example uses this flow to display DamagedHelmet in its top-left
 quadrant, with three ordinary scene light entities, Newport Loft HDRI sky and image-based
-lighting. Other quadrants remain empty.
+lighting and GPU bloom. The Render Feature Settings tool exposes Forward, Deferred,
+and PathTrace tabs; only Forward currently contains controls for bloom enable, mip
+levels, threshold, soft knee and intensity. The scene contains only the original
+helmet. Other quadrants remain empty.
+
+## Bloom
+
+`Bloom` implements both post-process interfaces and shares one internal graph
+builder. Install it with `forward.AddForwardPostProcess<Bloom>(BloomSettings{})`.
+The deferred entry point compiles against the deferred context without introducing
+a deferred renderer. It requires linear scene color, not a display-encoded target.
+
+The graph renders highlight extraction with threshold/soft knee into a half-size
+RGBA16f image. The first reduction uses grouped, luminance-weighted filtering
+with a robust neighborhood limit to suppress isolated HDR outliers and keep them
+from dominating the bloom pyramid. Non-finite samples are sanitized. Subsequent
+levels use linear 13-tap downsample passes, tent-filtered upsample passes,
+and a new full-size HDR composite. All chain images are transient RenderGraph
+resources; image processing stays on the GPU. Dimensions round up and clamp at
+one texel. Reconstruction is normalized to keep intensity independent of levels.
+
+`GetSettings()` / `SetSettings()` expose `Enabled`, `Threshold`, `SoftKnee`,
+`Intensity`, and `MipCount`. Enabled and level-count changes invalidate the graph.
+Threshold, knee and intensity are supplied at execution time, using fresh uniform
+buffers/bindings retired with the graph submission, with no extra waits. The graph
+retains the provider and GPU state through execution. Disabling bloom adds no bloom
+passes and preserves ordinary forward presentation.
 
 ## Outputs and multiple views
 
 `IRenderOutput::BuildTargets` returns fresh graph mappings for the current build.
 Each logical view maps to an image, array layer, mip, viewport, format and encoding.
 Outputs describe final destinations; providers can allocate intermediate HDR images
-and auxiliary buffers. An `IRenderOutputResolver` must convert/composite intermediates
-into those destinations and return the **new graph resource versions**. Without a
-resolver, providers must already have produced the requested destination mappings.
+and feature-specific auxiliary buffers. Each feature owns the conversion/composition
+into its destinations and returns the **new graph resource versions**. Forward
+rendering resolves its linear working color after all forward post-processes.
 Preserve destination pixels outside a viewport for split-screen composition.
 
 For split screen, create two renderer views using the same window handle and

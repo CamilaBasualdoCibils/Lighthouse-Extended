@@ -6,12 +6,12 @@ namespace Lighthouse
 {
 // Sky has its own pipeline and accepts ordinary feature outputs, so other
 // render paths can reuse it without adopting the forward material interface.
-class ISkyProvider : public IRenderProvider
+class ISkyProvider : public virtual IForwardProvider
 {
 public:
   virtual void BuildGraph(RenderFeatureContext&, RenderFeatureResult&) = 0;
 };
-class IEnvironmentProvider : public IRenderProvider
+class IEnvironmentProvider : public virtual IForwardProvider
 {
 public:
   virtual ISkyProvider* GetSky() const = 0;

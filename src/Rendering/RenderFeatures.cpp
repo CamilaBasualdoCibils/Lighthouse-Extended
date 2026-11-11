@@ -18,87 +18,73 @@ template<class T, class Context> void BuildOne(const std::shared_ptr<T>& value, 
 }
 template<class T, class Context> void BuildAll(const std::vector<std::shared_ptr<T>>& values, Context& ctx)
 { for (const auto& value : values) BuildOne(value, ctx); }
-}
-void RenderFeatureBase::Update(RenderUpdateContext& ctx)
+void ValidateDestination(RenderFeatureContext& frame, const RenderFeatureResult& result)
 {
-  UpdateAll(m_preparation, ctx);
-  UpdateAll(m_post, ctx);
-  UpdateOne(m_resolver, ctx);
-}
-void RenderFeatureBase::Prepare(RenderFeatureContext& ctx)
-{
-  for (const auto& provider : m_preparation)
-  {
-    Hold(ctx, provider);
-    provider->BuildGraph(ctx);
-  }
-}
-void RenderFeatureBase::Finish(RenderFeatureContext& ctx, RenderFeatureResult& result)
-{
-  for (const auto& effect : m_post)
-  {
-    for (const auto input : effect->RequiredInputs())
-    {
-      const auto found = result.auxiliary.find(input);
-      if (found == result.auxiliary.end())
-        throw std::logic_error("Post-process requires an unavailable render output");
-      ValidateRenderTargets(*ctx.family, found->second);
-    }
-    Hold(ctx, effect);
-    effect->BuildGraph(ctx, result);
-  }
-  if (m_resolver)
-  {
-    Hold(ctx, m_resolver);
-    result.color = m_resolver->BuildGraph(ctx, result);
-  }
-  else ResolveDefault(ctx, result);
-  ValidateRenderTargets(*ctx.family, result.color);
-  // Graph versions can change, but destination subresources and their encoding cannot.
+  ValidateRenderTargets(*frame.family, result.color);
   for (std::size_t i = 0; i < result.color.size(); ++i)
   {
     const auto& output = result.color[i];
-    const auto& target = ctx.destinations[i];
+    const auto& target = frame.destinations[i];
     if (output.arrayLayer != target.arrayLayer || output.mipLevel != target.mipLevel ||
         output.viewport.x != target.viewport.x || output.viewport.y != target.viewport.y ||
         output.viewport.width != target.viewport.width || output.viewport.height != target.viewport.height ||
         output.format != target.format || output.encoding != target.encoding)
-      throw std::logic_error("Render output does not match destination; provide an output resolver");
+      throw std::logic_error("Render output does not match destination");
   }
+}
+
 }
 void DeferredRenderFeature::Update(RenderUpdateContext& ctx)
 {
-  RenderFeatureBase::Update(ctx);
+  UpdateAll(m_preparation, ctx);
   UpdateAll(m_geometry, ctx); UpdateOne(m_shadows, ctx); UpdateOne(m_lighting, ctx);
   UpdateOne(m_reflections, ctx); UpdateAll(m_compositors, ctx); UpdateAll(m_post, ctx);
 }
 RenderFeatureResult DeferredRenderFeature::BuildGraph(RenderFeatureContext& frame)
 {
-  Prepare(frame);
   DeferredRenderContext ctx{frame, std::vector<GBufferResources>(frame.family->views.size()),
-                             RenderFeatureResult{frame.destinations}};
+                             DeferredRenderResult{RenderFeatureResult{frame.destinations}}};
+  BuildAll(m_preparation, ctx);
   BuildAll(m_geometry, ctx);
   BuildOne(m_shadows, ctx);
   BuildOne(m_lighting, ctx);
   // Reflection providers can read the lit scene and composite their contribution.
   BuildOne(m_reflections, ctx);
   BuildAll(m_compositors, ctx);
-  BuildAll(m_post, ctx);
-  Finish(frame, ctx.output);
+  for (const auto& post : m_post)
+  {
+    const auto required = post->GetDeferredDependencies();
+    for (auto semantic : required.attachments)
+    {
+      const auto found = ctx.output.auxiliary.find(semantic);
+      if (found == ctx.output.auxiliary.end())
+        throw std::logic_error("Deferred post-process requires an unavailable attachment");
+      ValidateRenderTargets(*frame.family, found->second);
+    }
+    for (auto history : required.history)
+    {
+      const auto found = ctx.output.history.find(history);
+      if (found == ctx.output.history.end())
+        throw std::logic_error("Deferred post-process requires unavailable history");
+      ValidateRenderTargets(*frame.family, found->second);
+    }
+    Hold(frame, post);
+    post->BuildGraphDeferred(ctx);
+  }
+  ValidateDestination(frame, ctx.output);
   return std::move(ctx.output);
 }
 void ForwardRenderFeature::Update(RenderUpdateContext& ctx)
 {
+  UpdateAll(m_preparation, ctx);
   UpdateOne(m_environment, ctx); UpdateOne(m_indirect, ctx);
-  RenderFeatureBase::Update(ctx);
   UpdateAll(m_geometry, ctx); UpdateOne(m_shadows, ctx); UpdateOne(m_lighting, ctx);
   UpdateOne(m_reflections, ctx); UpdateAll(m_compositors, ctx); UpdateAll(m_post, ctx);
 }
 RenderFeatureResult ForwardRenderFeature::BuildGraph(RenderFeatureContext& frame)
 {
-  Prepare(frame);
-  ForwardRenderContext ctx{frame, RenderFeatureResult{frame.destinations}};
-  // Forward lighting supplies data/shader integration to geometry providers.
+  ForwardRenderContext ctx{frame, ForwardRenderResult{RenderFeatureResult{frame.destinations}}};
+  BuildAll(m_preparation, ctx);
   BuildOne(m_shadows, ctx);
   BuildOne(m_lighting, ctx);
   BuildLightAssignment(ctx);
@@ -113,16 +99,53 @@ RenderFeatureResult ForwardRenderFeature::BuildGraph(RenderFeatureContext& frame
   BuildAll(m_geometry, ctx);
   BuildOne(m_reflections, ctx);
   BuildAll(m_compositors, ctx);
-  BuildAll(m_post, ctx);
-  Finish(frame, ctx.output);
+  for (const auto& post : m_post)
+  {
+    Hold(frame, post);
+    post->BuildGraphForward(ctx);
+  }
+  ResolveDefault(frame, ctx.output);
+  ValidateDestination(frame, ctx.output);
   return std::move(ctx.output);
+}
+namespace
+{
+template<class T> void Revision(std::uint64_t& revision, const std::shared_ptr<T>& provider)
+{
+  if (provider) revision = revision * 1099511628211ull ^ provider->GetConfigurationRevision();
+}
+template<class T> void Revision(std::uint64_t& revision, const std::vector<std::shared_ptr<T>>& providers)
+{
+  for (const auto& provider : providers) Revision(revision, provider);
+}
 }
 std::uint64_t ForwardRenderFeature::GetConfigurationRevision() const noexcept
 {
-  auto revision=RenderFeatureBase::GetConfigurationRevision();
-  if (m_environment) revision=revision*1099511628211ull ^ m_environment->GetConfigurationRevision();
-  if (m_indirect) revision=revision*1099511628211ull ^ m_indirect->GetConfigurationRevision();
-  for(const auto& provider:m_geometry)revision=revision*1099511628211ull ^ provider->GetConfigurationRevision();
+  auto revision = m_revision;
+  Revision(revision, m_preparation); Revision(revision, m_environment); Revision(revision, m_indirect);
+  Revision(revision, m_geometry); Revision(revision, m_shadows); Revision(revision, m_lighting);
+  Revision(revision, m_reflections); Revision(revision, m_compositors); Revision(revision, m_post);
+  return revision;
+}
+std::uint64_t DeferredRenderFeature::GetConfigurationRevision() const noexcept
+{
+  auto revision = m_revision;
+  Revision(revision, m_preparation);
+  Revision(revision, m_geometry); Revision(revision, m_shadows); Revision(revision, m_lighting);
+  Revision(revision, m_reflections); Revision(revision, m_compositors); Revision(revision, m_post);
+  return revision;
+}
+std::uint64_t PathTracingRenderFeature::GetConfigurationRevision() const noexcept
+{
+  auto revision = m_revision;
+  Revision(revision, m_geometry); Revision(revision, m_integrator); Revision(revision, m_lightSampling);
+  Revision(revision, m_denoiser); Revision(revision, m_compositors); Revision(revision, m_post);
+  return revision;
+}
+std::uint64_t ForwardPlusRenderFeature::GetConfigurationRevision() const noexcept
+{
+  auto revision = ForwardRenderFeature::GetConfigurationRevision();
+  Revision(revision, m_assignment);
   return revision;
 }
 void ForwardRenderFeature::ResolveDefault(RenderFeatureContext& frame,RenderFeatureResult& result)
@@ -136,13 +159,11 @@ void ForwardPlusRenderFeature::BuildLightAssignment(ForwardRenderContext& ctx)
 { BuildOne(m_assignment, ctx); }
 void PathTracingRenderFeature::Update(RenderUpdateContext& ctx)
 {
-  RenderFeatureBase::Update(ctx);
   UpdateAll(m_geometry, ctx); UpdateOne(m_lightSampling, ctx); UpdateOne(m_integrator, ctx);
   UpdateOne(m_denoiser, ctx); UpdateAll(m_compositors, ctx); UpdateAll(m_post, ctx);
 }
 RenderFeatureResult PathTracingRenderFeature::BuildGraph(RenderFeatureContext& frame)
 {
-  Prepare(frame);
   PathTracingRenderContext ctx{frame, {}, RenderFeatureResult{frame.destinations}};
   BuildAll(m_geometry, ctx);
   BuildOne(m_lightSampling, ctx);
@@ -150,7 +171,7 @@ RenderFeatureResult PathTracingRenderFeature::BuildGraph(RenderFeatureContext& f
   BuildOne(m_denoiser, ctx);
   BuildAll(m_compositors, ctx);
   BuildAll(m_post, ctx);
-  Finish(frame, ctx.output);
+  ValidateDestination(frame, ctx.output);
   return std::move(ctx.output);
 }
 } // namespace Lighthouse

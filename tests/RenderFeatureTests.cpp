@@ -1,5 +1,6 @@
 #include "RenderInfrastructureDevice.hpp"
 #include <Lighthouse/Extended/Rendering/Renderer.hpp>
+#include <Lighthouse/Extended/Rendering/Bloom.hpp>
 #include <Lighthouse/Extended/Rendering/SceneRenderProviders.hpp>
 #include <gtest/gtest.h>
 
@@ -70,10 +71,10 @@ struct WriteTarget : IDeferredGeometryProvider
     ctx.output.color.front().image = data.image;
   }
 };
-struct NeedsVariance : IRenderPostProcess
+struct NeedsNormal : IDeferredPostProcess
 {
-  std::vector<RenderSemantic> RequiredInputs() const override { return {RenderSemantic::Variance}; }
-  void BuildGraph(RenderFeatureContext&, RenderFeatureResult&) override {}
+  DeferredDependencies GetDeferredDependencies() const override { return {{DeferredSemantics::Normal}, {}}; }
+  void BuildGraphDeferred(DeferredRenderContext&) override {}
 };
 struct TrackedLighting : IDeferredLightingProvider
 {
@@ -227,7 +228,7 @@ TEST(RenderFeatures, RejectsMissingPostProcessInputs)
   auto* renderer = composer.GetTechnique<Renderer>(ref);
   auto& view = renderer->CreateView(Output(surface));
   view.SetViewFamily(Mono());
-  view.SetRenderFeature<DeferredRenderFeature>().AddPostProcess<NeedsVariance>();
+  view.SetRenderFeature<DeferredRenderFeature>().AddDeferredPostProcess<NeedsNormal>();
   EXPECT_THROW(composer.Compile(), std::logic_error);
 }
 
@@ -261,4 +262,62 @@ TEST(RenderFeatures, InvalidFamiliesAndMappingsAreRejected)
   EXPECT_THROW(ValidateRenderTargets(family, {}), std::invalid_argument);
   const RenderOutputTargets invalid{{1, kInvalidGraphResource, 0, 0, {0, 0, 64, 64}}};
   EXPECT_THROW(ValidateRenderTargets(family, invalid), std::invalid_argument);
+}
+
+TEST(RenderFeatures, MultiFeaturePostProcessHasOneProviderAndRunsTypedEntryPoints)
+{
+  struct Both final : IForwardPostProcess, IDeferredPostProcess
+  {
+    int& updates; int& forward; int& deferred;
+    Both(int& u,int& f,int& d):updates(u),forward(f),deferred(d){}
+    void Update(RenderUpdateContext&) override { ++updates; }
+    void BuildGraphForward(ForwardRenderContext&) override { ++forward; }
+    void BuildGraphDeferred(DeferredRenderContext&) override { ++deferred; }
+  };
+  static_assert(std::derived_from<Both,IRenderProvider>);
+  TestComposer composer;
+  auto surface=composer.CreateView<Surface>();
+  auto ref=composer.AddTechnique<Renderer>(&composer);
+  auto* renderer=composer.GetTechnique<Renderer>(ref);
+  int updates=0,forward=0,deferred=0;
+  auto& first=renderer->CreateView(Output(surface));first.SetViewFamily(Mono());
+  first.SetRenderFeature<ForwardRenderFeature>().AddForwardPostProcess<Both>(updates,forward,deferred);
+  auto& second=renderer->CreateView(Output(surface,64));second.SetViewFamily(Mono(2));
+  second.SetRenderFeature<DeferredRenderFeature>().AddDeferredPostProcess<Both>(updates,forward,deferred);
+  renderer->Update(0);composer.Compile();
+  EXPECT_EQ(updates,2);EXPECT_EQ(forward,1);EXPECT_EQ(deferred,1);
+}
+TEST(RenderFeatures, BloomRevisionsTrackStructureAndValidateSettings)
+{
+  Bloom bloom;auto revision=bloom.GetConfigurationRevision();
+  auto settings=bloom.GetSettings();settings.Threshold=2;settings.Intensity=0.8f;settings.SoftKnee=0;
+  bloom.SetSettings(settings);EXPECT_EQ(revision,bloom.GetConfigurationRevision());
+  settings.MipCount=8;bloom.SetSettings(settings);EXPECT_NE(revision,bloom.GetConfigurationRevision());
+  revision=bloom.GetConfigurationRevision();settings.Enabled=false;bloom.SetSettings(settings);
+  EXPECT_NE(revision,bloom.GetConfigurationRevision());
+  settings.MipCount=0;EXPECT_THROW(bloom.SetSettings(settings),std::invalid_argument);
+  settings.MipCount=1;settings.Intensity=-1;EXPECT_THROW(bloom.SetSettings(settings),std::invalid_argument);
+}
+
+TEST(RenderFeatures, DeferredHistoryCannotBeSatisfiedByCurrentAttachments)
+{
+  struct Depth final : IDeferredGeometryProvider
+  {
+    void BuildGraph(DeferredRenderContext& context) override
+    { context.output.auxiliary[DeferredSemantics::Depth] = context.output.color; }
+  };
+  struct History final : IDeferredPostProcess
+  {
+    DeferredDependencies GetDeferredDependencies() const override
+    { return {{}, {DeferredHistory::Depth}}; }
+    void BuildGraphDeferred(DeferredRenderContext&) override {}
+  };
+  TestComposer composer;
+  auto surface=composer.CreateView<Surface>();
+  auto ref=composer.AddTechnique<Renderer>(&composer);
+  auto& view=composer.GetTechnique<Renderer>(ref)->CreateView(Output(surface));
+  view.SetViewFamily(Mono());
+  auto& feature=view.SetRenderFeature<DeferredRenderFeature>();
+  feature.AddProvider<Depth>();feature.AddDeferredPostProcess<History>();
+  EXPECT_THROW(composer.Compile(),std::logic_error);
 }

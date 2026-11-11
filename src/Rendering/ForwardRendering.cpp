@@ -270,7 +270,7 @@ void ForwardRenderServices::BeginGeometry(ForwardRenderContext& ctx)
                       RenderColorEncoding::SceneLinear});
   }
   ctx.output.color = std::move(colors);
-  ctx.output.auxiliary[RenderSemantic::Depth] = std::move(depths);
+  ctx.output.auxiliary[ForwardSemantics::Depth] = std::move(depths);
 }
 void ForwardRenderServices::Resolve(RenderFeatureContext& frame,
                                     RenderFeatureResult& output)

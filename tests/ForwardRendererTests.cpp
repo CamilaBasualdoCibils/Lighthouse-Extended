@@ -1,4 +1,5 @@
 #include <Lighthouse/Extended/Rendering/Renderer.hpp>
+#include <Lighthouse/Extended/Rendering/Bloom.hpp>
 #include <Lighthouse/Extended/Rendering/SceneProvider.hpp>
 #include <Lighthouse/Extended/Rendering/ForwardRendering.hpp>
 #include <Lighthouse/Extended/Resources/Resources.hpp>
@@ -146,10 +147,68 @@ int main(int argc,char** argv)
         Check(renderer->NeedsRebuild(),"HDR source revision did not invalidate the graph");
         composer.Compile();composer.Render();gpu.WaitIdle();
         Check(hdrPixels==gpu.ReadImage(image),"Re-upload changed constant HDR pixels");
+        // Bloom is entirely GPU-rendered and remains in HDR until resolve.
+        auto& bloom = skyOnly.AddForwardPostProcess<Bloom>(BloomSettings{.Intensity=0.5f,.MipCount=5});
+        Check(renderer->NeedsRebuild(), "Adding bloom did not invalidate the graph");
+        composer.Compile();
+        const auto bloomGraph=composer.GetRenderGraph().GetInspectionData(true);
+        std::size_t compositeIndex=0,resolveIndex=0;
+        for(std::size_t i=0;i<bloomGraph.passes.size();++i) {
+          if(bloomGraph.passes[i].name=="Bloom composite")compositeIndex=i;
+          if(bloomGraph.passes[i].name=="Resolve forward view")resolveIndex=i;
+        }
+        Check(compositeIndex<resolveIndex,"Bloom must precede tone mapping");
+        composer.Render();gpu.WaitIdle();
+        auto bloomPixels=gpu.ReadImage(image);
+        for(int channel=0;channel<3;++channel)
+          Check(std::abs(std::to_integer<int>(bloomPixels[index+channel])-expected(constant[channel]*1.375f))<=3,
+                "GPU bloom composite differs from expected HDR result");
+        auto bloomSettings=bloom.GetSettings(); bloomSettings.Intensity=0;
+        bloom.SetSettings(bloomSettings);renderer->Update(0.016f);
+        Check(!renderer->NeedsRebuild(),"Bloom intensity unnecessarily rebuilt the graph");
+        composer.Render();gpu.WaitIdle();
+        Check(hdrPixels==gpu.ReadImage(image),"Zero bloom intensity changed the scene");
+        bloomSettings.Enabled=false; bloom.SetSettings(bloomSettings);renderer->Update(0.016f);
+        Check(renderer->NeedsRebuild(),"Disabling bloom did not invalidate graph structure");
+        composer.Compile();composer.Render();gpu.WaitIdle();
+        Check(hdrPixels==gpu.ReadImage(image),"Disabled bloom changed the scene");
+        bloomSettings.Enabled=true;bloomSettings.Intensity=0.5f;bloomSettings.MipCount=32;
+        bloom.SetSettings(bloomSettings);
+        for(const UVec2 size : {UVec2(63,35),UVec2(1,1),UVec2(1,7)}) {
+          camera.resolution=size;view.SetViewFamily({{camera}});renderer->Update(0.016f);
+          composer.Compile();composer.Render();gpu.WaitIdle();
+          const auto tinyPixels=gpu.ReadImage(image);
+          for(int channel=0;channel<3;++channel)
+            Check(std::abs(std::to_integer<int>(tinyPixels[index+channel])-expected(constant[channel]*1.375f))<=3,
+                  "Bloom failed for odd or small viewport dimensions");
+        }
+        // A localized emissive mesh must cast bloom into neighboring dark pixels.
+        MaterialAsset glowMaterial;glowMaterial.baseColorFactor=Vec4(0,0,0,1);
+        glowMaterial.emissiveFactor=Vec3(20,4,0.5f);
+        const auto glowHandle=MaterialResource::FromData(glowMaterial);
+        for(auto entity:scene.Registry().view<MeshRender>())scene.Registry().get<MeshRender>(entity).material=glowHandle;
+        key.Get<Light>().enabled=false;fill.Get<Light>().enabled=false;
+        auto& glowFeature=view.SetRenderFeature<ForwardRenderFeature>();
+        glowFeature.AddProvider<SceneProvider>(store);glowFeature.SetLighting<DefaultForwardLightingProvider>(store);
+        camera.resolution={128,128};view.SetViewFamily({{camera}});renderer->Update(0.016f);
+        composer.Compile();composer.Render();gpu.WaitIdle();const auto withoutGlow=gpu.ReadImage(image);
+        glowFeature.AddForwardPostProcess<Bloom>(BloomSettings{.Intensity=0.5f,.MipCount=5});
+        composer.Compile();composer.Render();gpu.WaitIdle();const auto withGlow=gpu.ReadImage(image);
+        std::size_t haloPixels=0;
+        for(std::size_t y=0;y<256;++y)for(std::size_t x=0;x<256;++x) {
+          const auto offset=(y*256+x)*4;
+          const bool inside=x<128 && y>=firstRow && y<firstRow+128;
+          if(inside && std::to_integer<int>(withoutGlow[offset])<70 &&
+             std::to_integer<int>(withGlow[offset])>std::to_integer<int>(withoutGlow[offset])+5)++haloPixels;
+          if(!inside)
+            for(int channel=0;channel<4;++channel)
+              Check(withoutGlow[offset+channel]==withGlow[offset+channel],"Bloom overwrote a neighboring region");
+        }
+        Check(haloPixels>20,"GPU bloom did not spread highlights beyond emissive geometry");
         composer.GetRenderGraph().Clear();composer.RemoveTechnique(ref.handle);
       }
       gpu.DestroyImageView(imageView);gpu.DestroyImage(image);
-      std::cout<<backend->Name()<<": shared materials (forward/deferred/ray), custom Lit/Unlit pixels, lighting, split regions and cache passed\n";
+      std::cout<<backend->Name()<<": shared materials (forward/deferred/ray), custom Lit/Unlit pixels, lighting, split regions, cache and GPU mip-chain bloom passed\n";
     }
     backend->Shutdown();return 0;
   }catch(const std::exception& error){std::cerr<<error.what()<<'\n';return 1;}

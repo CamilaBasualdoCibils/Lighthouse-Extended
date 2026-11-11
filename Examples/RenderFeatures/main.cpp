@@ -5,6 +5,7 @@
 #include <Lighthouse/Backends/Input/GLFW/GLFWInputBackend.hpp>
 #include <Lighthouse/Engine/Engine.hpp>
 #include <Lighthouse/Extended/Rendering/ForwardRendering.hpp>
+#include <Lighthouse/Extended/Rendering/Bloom.hpp>
 #include <Lighthouse/Extended/Rendering/Renderer.hpp>
 #include <Lighthouse/Extended/Rendering/SceneProvider.hpp>
 #include <Lighthouse/Extended/Resources/Resources.hpp>
@@ -24,6 +25,7 @@
 #include <array>
 #include <cmath>
 #include <memory>
+#include <imgui.h>
 
 namespace
 {
@@ -91,6 +93,49 @@ public:
   }
 };
 
+class RenderFeatureSettingsTool final : public ISimpleTool
+{
+public:
+  RenderFeatureSettingsTool(EngineRuntime&, Bloom& bloom) : m_bloom(bloom) {}
+  std::string_view Name() const noexcept override { return "Render Feature Settings"; }
+  void Draw() override
+  {
+    if (!ImGui::BeginTabBar("RenderFeatureTabs"))
+      return;
+    if (ImGui::BeginTabItem("Forward"))
+    {
+      ImGui::SeparatorText("Mip-chain bloom");
+      auto settings = m_bloom.GetSettings();
+      bool changed = ImGui::Checkbox("Enabled", &settings.Enabled);
+      ImGui::BeginDisabled(!settings.Enabled);
+      int levels = static_cast<int>(settings.MipCount);
+      if (ImGui::SliderInt("Mip levels", &levels, 1, 16))
+      {
+        settings.MipCount = static_cast<std::uint32_t>(levels);
+        changed = true;
+      }
+      if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Maximum downsample levels; stops when the image reaches 1 x 1.");
+      changed |= ImGui::DragFloat("Threshold", &settings.Threshold, 0.05f, 0.0f, 100.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+      changed |= ImGui::SliderFloat("Soft knee", &settings.SoftKnee, 0.0f, 1.0f, "%.2f");
+      if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Softens highlight extraction near Threshold. Does not change blur radius or highlights far above Threshold.");
+      changed |= ImGui::DragFloat("Intensity", &settings.Intensity, 0.01f, 0.0f, 5.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+      ImGui::EndDisabled();
+      if (changed)
+        m_bloom.SetSettings(settings);
+      ImGui::EndTabItem();
+    }
+    if (ImGui::BeginTabItem("Deferred"))
+      ImGui::EndTabItem();
+    if (ImGui::BeginTabItem("PathTrace"))
+      ImGui::EndTabItem();
+    ImGui::EndTabBar();
+  }
+private:
+  Bloom& m_bloom;
+};
+
 class RenderFeaturesExample final : public IApplication
 {
 public:
@@ -115,7 +160,7 @@ public:
 
     const auto technique = composer.AddTechnique<Renderer>(&composer);
     m_renderer = composer.GetTechnique<Renderer>(technique);
-    const auto resource = Resource::LoadScene("DamagedHelmet.gltf");
+    const auto resource = Resource::LoadScene("ABeautifulGame.glb");
     m_scene = std::make_unique<Scene>(resource.GetDefaultScene());
     m_store = std::make_shared<SceneRenderStore>(*m_scene);
     const auto addLight =
@@ -127,9 +172,9 @@ public:
       light.color = color;
       light.intensity = intensity;
     };
-    addLight("Key light", {-25, -30, 0}, {1.0f, 0.92f, 0.82f}, 4.0f);
+    addLight("Key light", {-25, -30, 0}, {1.0f, 0.92f, 0.82f}, 12.0f);
     addLight("Fill light", {10, 45, 0}, {0.65f, 0.8f, 1.0f}, 1.5f);
-    addLight("Rim light", {-15, 150, 0}, {1.0f, 0.85f, 0.65f}, 3.0f);
+    addLight("Rim light", {-15, 150, 0}, {1.0f, 0.85f, 0.65f}, 9.0f);
 
     auto environment = std::make_shared<HDRIEnvironment>(Resource::LoadImage(
         "hayloft_2k.hdr", ImageLoadOptions{.mipPolicy = MipPolicy::Generate}));
@@ -149,6 +194,9 @@ public:
       {
         auto& forward = view.SetRenderFeature<ForwardRenderFeature>();
         forward.AddProvider<SceneProvider>(m_store);
+        auto& bloom = forward.AddForwardPostProcess<Bloom>(
+            BloomSettings{.Threshold=1.0f,.SoftKnee=0.5f,.Intensity=0.35f,.MipCount=6});
+        GetToolBox().AddTool<RenderFeatureSettingsTool>(bloom);
         forward.SetLighting<DefaultForwardLightingProvider>(m_store);
         forward.SetEnvironmentProvider<EnvironmentProvider>(
             std::make_shared<HDRISkyProvider>(environment));
