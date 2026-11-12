@@ -90,6 +90,21 @@ public:
   // A snapshot retains owned pixels/callbacks across subsequent updates.
   ImageSource GetSource() const { return m_state->source; }
 
+  std::string GetName() const
+  {
+    if (std::holds_alternative<FileImage>(m_state->source))
+      return std::get<FileImage>(m_state->source).path.filename().string();
+    if (std::holds_alternative<GLTFImage>(m_state->source))
+    {
+      const auto gltfImage = std::get<GLTFImage>(m_state->source);
+      if (std::holds_alternative<std::filesystem::path>(gltfImage.asset->images[gltfImage.image].data))
+        return "GLTF Image " + std::get<std::filesystem::path>(gltfImage.asset->images[gltfImage.image].data).filename().string();
+      else
+        return "GLTF Image " + std::to_string(gltfImage.image);
+    }
+    return "Unknown Image";
+  }
+
   // Decode/generate on explicit demand. HDR files retain linear RGBA32f values.
   ImageData Resolve() const;
 

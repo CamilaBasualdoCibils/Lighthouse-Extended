@@ -159,7 +159,7 @@ public:
 
     const auto technique = composer.AddTechnique<Renderer>(&composer);
     m_renderer = composer.GetTechnique<Renderer>(technique);
-    const auto resource = Resource::LoadScene("DamagedHelmet.gltf");
+    const auto resource = Resource::LoadScene("/home/camila/Downloads/sponza/main_sponza/NewSponza_Main_glTF_003.gltf");
     m_scene = std::make_unique<Scene>(resource.GetDefaultScene());
     m_store = std::make_shared<SceneRenderStore>(*m_scene);
     const auto addLight =

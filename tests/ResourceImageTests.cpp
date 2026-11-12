@@ -1,5 +1,6 @@
 #include <Lighthouse/Extended/Resources/Resource.hpp>
 #include <gtest/gtest.h>
+#include <fstream>
 
 using namespace Lighthouse;
 static_assert(std::is_class_v<Resource>);
@@ -71,4 +72,34 @@ TEST(ResourceImage, InvalidUpdatesLeaveResourceUnchanged)
   EXPECT_THROW(image.UpdateGenerator({}), std::invalid_argument);
   EXPECT_EQ(image.GetRevision(), 1u);
   EXPECT_TRUE(std::holds_alternative<Resource::MemoryImage>(image.GetSource()));
+}
+
+TEST(ResourceImage, ExternalAndEmbeddedGLTFImagesDecodeConsistently)
+{
+  const auto directory = std::filesystem::path(LIGHTHOUSE_TEST_SOURCE_DIR) / "tests/Fixtures";
+  for (const auto* name : {"Decoder.png", "Decoder.jpg", "Mips.ktx"}) {
+    SCOPED_TRACE(name);
+    const auto path = directory / name;
+    std::ifstream input(path, std::ios::binary | std::ios::ate);
+    ASSERT_TRUE(input);
+    std::vector<std::byte> bytes(static_cast<std::size_t>(input.tellg()));
+    input.seekg(0);
+    ASSERT_TRUE(input.read(reinterpret_cast<char*>(bytes.data()), bytes.size()));
+    auto asset = std::make_shared<GLTFAsset>();
+    asset->images.push_back({.data=path});
+    asset->images.push_back({.data=std::move(bytes)});
+    const auto external = Image::FromGLTF(asset, 0).Resolve();
+    const auto embedded = Image::FromGLTF(asset, 1).Resolve();
+    const auto standalone = Resource::LoadImage(path).Resolve();
+    EXPECT_EQ(external.format, embedded.format);
+    EXPECT_EQ(external.format, standalone.format);
+    EXPECT_EQ(external.generateMipmaps, embedded.generateMipmaps);
+    ASSERT_EQ(external.GetMipCount(), embedded.GetMipCount());
+    ASSERT_EQ(external.GetMipCount(), standalone.GetMipCount());
+    for (std::size_t mip = 0; mip < external.GetMipCount(); ++mip) {
+      EXPECT_EQ(external.GetResolution(mip), embedded.GetResolution(mip));
+      EXPECT_EQ(external.mips[mip].data, embedded.mips[mip].data);
+      EXPECT_EQ(external.mips[mip].data, standalone.mips[mip].data);
+    }
+  }
 }

@@ -1,6 +1,7 @@
 #include <Lighthouse/Extended/Rendering/DeferredRendering.hpp>
 #include <Lighthouse/Extended/Rendering/SceneRenderProviders.hpp>
 #include <array>
+#include <spdlog/spdlog.h>
 namespace Lighthouse
 {
 struct SceneDeferredRenderProvider::History
@@ -84,8 +85,7 @@ void SceneDeferredRenderProvider::BuildGraph(DeferredRenderContext& context)
     // Alpha-blended surfaces need a forward transparency stage; never silently
     // turn them into opaque G-buffer surfaces.
     if (draw.source->data.alphaMode == MaterialAsset::AlphaMode::Blend)
-      throw std::logic_error(
-          "Deferred alpha-blended materials require a transparency compositor");
+      spdlog::error("Deferred alpha-blended materials require a transparency compositor");
     draw.dependencies = {
         importBuffer("Deferred mesh vertices", draw.mesh->vertices),
         importBuffer("Deferred mesh indices", draw.mesh->indices),

@@ -4,10 +4,11 @@
 #include <limits>
 #include <array>
 #include <bit>
+#include <spdlog/spdlog.h>
 
 #define STB_IMAGE_STATIC
 #define STB_IMAGE_IMPLEMENTATION
-#define STBI_NO_STDIO
+#define STBI_WINDOWS_UTF8
 #include <stb_image.h>
 
 namespace Lighthouse
@@ -85,10 +86,10 @@ ImageData DecodeKTX(std::span<const std::byte> bytes)
   }
   return {format,std::move(mips)};
 }
-ImageData DecodeImage(std::span<const std::byte> bytes)
+constexpr std::array<unsigned char,12> ktxSignature{0xab,0x4b,0x54,0x58,0x20,0x31,0x31,0xbb,0x0d,0x0a,0x1a,0x0a};
+ImageData DecodeEmbeddedImage(std::span<const std::byte> bytes)
 {
-  constexpr std::array<unsigned char,12> ktx{0xab,0x4b,0x54,0x58,0x20,0x31,0x31,0xbb,0x0d,0x0a,0x1a,0x0a};
-  if (bytes.size()>=ktx.size() && std::memcmp(bytes.data(),ktx.data(),ktx.size())==0) return DecodeKTX(bytes);
+  if (bytes.size()>=ktxSignature.size() && std::memcmp(bytes.data(),ktxSignature.data(),ktxSignature.size())==0) return DecodeKTX(bytes);
   if (bytes.empty() || bytes.size() > std::size_t(std::numeric_limits<int>::max()))
     throw std::runtime_error("Encoded image size is outside stb_image's supported range");
   const auto* data = reinterpret_cast<const stbi_uc*>(bytes.data());
@@ -101,16 +102,39 @@ ImageData DecodeImage(std::span<const std::byte> bytes)
   auto* pixels = stbi_load_from_memory(data, length, &width, &height, &channels, STBI_rgb_alpha);
   return DecodedPixels(pixels, width, height, ImageFormat::RGBA8);
 }
+ImageData DecodeImageFile(const std::filesystem::path& path)
+{
+  // KTX has its own container decoder; ordinary images go straight to stb's
+  // file API without buffering the entire encoded file in application memory.
+  std::array<unsigned char, ktxSignature.size()> signature{};
+  {
+    std::ifstream file(path, std::ios::binary);
+    if (!file) throw std::runtime_error("Cannot read render resource: " + path.string());
+    file.read(reinterpret_cast<char*>(signature.data()), signature.size());
+    if (file.gcount() == signature.size() && signature == ktxSignature)
+      return DecodeKTX(ReadFile(path));
+  }
+  const auto filename = path.u8string();
+  const auto* name = reinterpret_cast<const char*>(filename.c_str());
+  int width = 0, height = 0, channels = 0;
+  if (stbi_is_hdr(name)) {
+    auto* pixels = stbi_loadf(name, &width, &height, &channels, STBI_rgb_alpha);
+    return DecodedPixels(pixels, width, height, ImageFormat::RGBA32f);
+  }
+  auto* pixels = stbi_load(name, &width, &height, &channels, STBI_rgb_alpha);
+  return DecodedPixels(pixels, width, height, ImageFormat::RGBA8);
+}
 } // namespace
 ImageData Image::Resolve() const
 {
+  spdlog::info("Resolving image: {}", GetName());
   return std::visit([](const auto& source) -> ImageData {
     using T = std::decay_t<decltype(source)>;
     if constexpr (std::is_same_v<T, MemoryImage>) return *source.data;
     else if constexpr (std::is_same_v<T, GeneratedImage>) return source.generator();
     else if constexpr (std::is_same_v<T, FileImage>)
     {
-      auto pixels = DecodeImage(ReadFile(source.path));
+      auto pixels = DecodeImageFile(source.path);
       if (source.options.format && *source.options.format != pixels.GetFormat())
         throw std::runtime_error("Requested image format does not match decoded pixel format");
       if (source.options.flipY) {
@@ -127,8 +151,8 @@ ImageData Image::Resolve() const
     else
     {
       const auto& data = source.asset->images.at(source.image).data;
-      if (const auto* path = std::get_if<std::filesystem::path>(&data)) return ApplyImageMipPolicy(DecodeImage(ReadFile(*path)),MipPolicy::Auto);
-      return ApplyImageMipPolicy(DecodeImage(std::get<std::vector<std::byte>>(data)),MipPolicy::Auto);
+      if (const auto* path = std::get_if<std::filesystem::path>(&data)) return ApplyImageMipPolicy(DecodeImageFile(*path),MipPolicy::Auto);
+      return ApplyImageMipPolicy(DecodeEmbeddedImage(std::get<std::vector<std::byte>>(data)),MipPolicy::Auto);
     }
   }, GetSource());
 }
