@@ -28,6 +28,14 @@ enum class SurfaceModel
 };
 BOOST_DESCRIBE_ENUM(Lighthouse::SurfaceModel, Unlit, Lit)
 
+// Scene-table compilation is separate from the legacy per-material binding path.
+// Fixed texture bindings remain available for backends without descriptor indexing.
+struct SceneMaterialShaderOptions
+{
+  bool enabled{};
+  bool bindless{};
+  std::uint32_t textureCount{1};
+};
 enum class MaterialRenderPath { Forward, Deferred, RayTracing };
 struct CompiledMaterialShaders
 {
@@ -140,13 +148,14 @@ struct Material : std::enable_shared_from_this<Material>
   Material(const Material&) = delete;
   Material& operator=(const Material&) = delete;
   std::shared_ptr<const MaterialInstance>
-  Instantiate(const MaterialLoadOptions& options = {}) const;
+  Instantiate(const MaterialLoadOptions& options = {}, bool createBindings = true) const;
   // All targets use the same surface model, parameters and evaluateMaterial().
   // Ray shader compilation does not require a device with ray-tracing support.
   CompiledMaterialShaders Compile(MaterialRenderPath path,
                                   std::string_view lightingSource = {},
                                   std::string_view indirectSource = {},
-                                  std::span<const GBufferAttribute> gbufferLayout = {}) const;
+                                  std::span<const GBufferAttribute> gbufferLayout = {},
+                                  SceneMaterialShaderOptions scene = {}) const;
 
   SurfaceModel model = SurfaceModel::Unlit;
   std::shared_ptr<const ShadingModel> shadingModel;
@@ -177,6 +186,7 @@ struct MaterialInstance
   std::shared_ptr<const Material> material;
   Lighthouse::DescriptorSetHandle parametersSet{};
   Lighthouse::BufferHandle parametersBuffer{};
+  std::vector<std::array<std::uint32_t,4>> parameterData;
   // Borrowed; callers keep textures alive through GPU completion.
   std::vector<Lighthouse::DescriptorImageInfo> textures;
 

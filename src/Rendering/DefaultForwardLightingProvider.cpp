@@ -107,7 +107,7 @@ void DefaultForwardLightingProvider::BuildGraph(ForwardRenderContext& ctx)
         if (!lights.empty())
           std::memcpy(bytes.data() + sizeof(header), lights.data(),
                       lights.size() * sizeof(LightData));
-        WriteHostBuffer(*state->device, state->buffer, bytes);
+        WriteRetiredHostBuffer(*state->device, state->buffer, bytes);
       });
   ctx.lights.push_back(pass.buffer);
   ctx.lightingBuffer = state->buffer;

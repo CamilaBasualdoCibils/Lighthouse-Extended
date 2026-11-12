@@ -66,7 +66,7 @@ RenderGraphResource ImportTexture(RenderFeatureContext& frame, const char* name,
   return frame.technique.graph.Import(name,
     ImportedRenderGraphImage::Desc{size.x, size.y, texture->sourceImage->format, ImageUsage::Sampled},
     ImportedRenderGraphImage{texture->view, texture->image,
-      {ImageAspect::Color,0,texture->sourceImage->mipLevels,0,1}});
+      {ImageAspect::Color,0,texture->sourceImage->mipLevels,0,1},ImageLayout::ShaderReadOnly});
 }
 // Per-graph descriptors/pipelines; captured by execution callbacks and keepAlive.
 struct Bindings
@@ -129,6 +129,8 @@ void FilterTexture(IRenderDevice& device, SceneTextureGPU& target,
   } views{device,{}};
   auto size=target.sourceImage->resolution;
   const auto count=target.sourceImage->mipLevels;
+  commands->ImageBarrier({.image=target.image,.oldLayout=ImageLayout::Undefined,.newLayout=ImageLayout::ColorAttachment,
+      .subresource={ImageAspect::Color,0,count,0,1}});
   for (unsigned mip=0;mip<count;++mip) {
     auto set=std::make_shared<Bindings>();set->device=&device;
     // Parameters are distinct per draw: descriptors resolve at submission time.
@@ -146,6 +148,8 @@ void FilterTexture(IRenderDevice& device, SceneTextureGPU& target,
     commands->Draw(PrimitiveTopology::TriangleList,3,0);commands->EndRendering();
     sets.push_back(std::move(set));size={std::max(1u,size.x/2),std::max(1u,size.y/2)};
   }
+  commands->ImageBarrier({.image=target.image,.oldLayout=ImageLayout::ColorAttachment,.newLayout=ImageLayout::ShaderReadOnly,
+      .subresource={ImageAspect::Color,0,count,0,1}});
   commands->MemoryBarrier({.srcStageMask=PipelineStage::ColorAttachmentOutput,
     .srcAccessMask=PipelineAccess::ColorAttachmentWrite,.dstStageMask=PipelineStage::FragmentShader,
     .dstAccessMask=PipelineAccess::ShaderSampledRead});
@@ -289,7 +293,7 @@ void HDRISkyProvider::BuildSky(RenderFeatureContext& ctx, RenderFeatureResult& o
       [state,texture,family=ctx.family,view](const Data& data,FrameGraphPassResources& resources,RenderGraphExecutePassContext& execute) {
         const auto& camera=family->views[view];
         const std::array matrices{glm::inverse(camera.projection),glm::inverse(Mat4(glm::mat3(camera.view)))};
-        WriteHostBuffer(*state->device,state->frame,std::as_bytes(std::span(matrices)));
+        WriteRetiredHostBuffer(*state->device,state->frame,std::as_bytes(std::span(matrices)));
         auto& commands=*execute.commandList;
         commands.MemoryBarrier({.srcStageMask=PipelineStage::ColorAttachmentOutput,
           .srcAccessMask=PipelineAccess::ColorAttachmentWrite,.dstStageMask=PipelineStage::ColorAttachmentOutput,

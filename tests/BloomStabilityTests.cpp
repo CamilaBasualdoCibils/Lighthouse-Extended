@@ -212,7 +212,7 @@ int main(int argc, char** argv)
                       128, 128, ImageFormat::RGBA8,
                       ImageUsage::TransferDestination |
                           ImageUsage::TransferSource},
-                  ImportedRenderGraphImage{imageView, image});
+                  ImportedRenderGraphImage{imageView,image,{},context.device.GetImageLayout(image)});
               return RenderOutputTargets{{family.views[0].id,
                                           output,
                                           0,

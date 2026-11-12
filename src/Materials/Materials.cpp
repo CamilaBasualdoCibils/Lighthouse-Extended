@@ -46,7 +46,7 @@ MaterialInstance::~MaterialInstance()
     device.DestroyBuffer(parametersBuffer);
 }
 std::shared_ptr<const MaterialInstance>
-Material::Instantiate(const MaterialLoadOptions& options) const
+Material::Instantiate(const MaterialLoadOptions& options, bool createBindings) const
 {
   using namespace Lighthouse;
   const auto definition = Detail::ReadDefinition(path, options);
@@ -57,10 +57,12 @@ Material::Instantiate(const MaterialLoadOptions& options) const
   auto instance = std::shared_ptr<MaterialInstance>(
       new MaterialInstance(shared_from_this()));
   instance->textures = definition.textures;
+  instance->parameterData = definition.data;
   for (const auto& texture : instance->textures)
     if (!m_device.IsValid(texture.sampler))
       throw std::runtime_error(
           "Texture sampler is invalid or belongs to another device");
+  if (!createBindings) return instance;
   instance->parametersBuffer = m_device.CreateBuffer(
       {.size = definition.data.size() * sizeof(definition.data[0]),
        .usage = BufferUsage::Uniform,
@@ -173,7 +175,7 @@ Materials::LoadShadingModel(SurfaceModel model)
        .fragmentShader = shading->m_fragment,
        .vertexLayout = volumeLayout,
        .colorFormats = {ImageFormat::RGBA16f},
-       .depthFormat = ImageFormat::Depth24Stencil8,
+       .depthFormat = ImageFormat::Depth24Stencil8,.stencilFormat=ImageFormat::Depth24Stencil8,
        .layout = pipeline.layout,
        .blend = {.enabled = model == SurfaceModel::Lit,
                  .sourceColorFactor = BlendFactor::One,
@@ -181,7 +183,8 @@ Materials::LoadShadingModel(SurfaceModel model)
                  .colorOperation = BlendOperation::Add,
                  .sourceAlphaFactor = BlendFactor::One,
                  .destinationAlphaFactor = BlendFactor::One,
-                 .alphaOperation = BlendOperation::Add}});
+                 .alphaOperation = BlendOperation::Add},
+       .depthStencil={.depthTest=false,.depthWrite=false,.stencil=StencilMode::Equal}});
   if (!pipeline.pipeline)
     throw std::runtime_error(
         "Device returned an invalid deferred lighting pipeline");
@@ -292,8 +295,8 @@ Materials::Load(const std::filesystem::path& path)
                               .format = VertexFormat::Float2,
                               .offset = offsetof(Mesh3DVertex, uv)}}},
          .colorFormats = formats,
-         .depthFormat = ImageFormat::Depth24Stencil8,
-         .layout = material->graphicsLayout});
+         .depthFormat = ImageFormat::Depth24Stencil8,.stencilFormat=ImageFormat::Depth24Stencil8,
+         .layout = material->graphicsLayout,.depthStencil={.depthTest=true,.depthWrite=true,.stencil=StencilMode::Write}});
     if (!material->gBufferPipeline)
       throw std::runtime_error("Device returned an invalid graphics pipeline");
 

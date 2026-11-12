@@ -138,8 +138,14 @@ Deferred lighting evaluates the same surface BRDF, direct scene-light records an
 split-sum HDRI lighting as forward. It preserves the sky wherever depth is clear,
 then runs reflections, compositors and `BuildGraphDeferred` post-processes. The
 same Bloom class processes the HDR result before the common scene-color resolver.
-Bindings/frame buffers are immutable per submission and retired through RenderGraph.
-No new per-frame waits or manually managed command-list Begin/End are introduced.
+Forward and deferred geometry use persistent scene-view binding groups: a view
+uniform buffer, object records, material parameters and texture-index tables.
+Vulkan uses a shared descriptor array for material textures when core descriptor
+indexing is available. Fixed material bindings remain a separate fallback strategy.
+A draw-index constant selects the object/material records. Buffers and descriptor
+sets are built with the graph, then updated after the previous graph submission
+retires; there are no per-object empty submissions or waits. Bloom, lighting and
+resolve bindings are reused, and the graph allocator pools retired images/buffers.
 
 The scene G-buffer pass handles opaque and alpha-masked materials. Alpha-blended
 materials require a transparency compositor and are explicitly rejected by that
@@ -164,8 +170,8 @@ one texel. Reconstruction is normalized to keep intensity independent of levels.
 
 `GetSettings()` / `SetSettings()` expose `Enabled`, `Threshold`, `SoftKnee`,
 `Intensity`, and `MipCount`. Enabled and level-count changes invalidate the graph.
-Threshold, knee and intensity are supplied at execution time, using fresh uniform
-buffers/bindings retired with the graph submission, with no extra waits. The graph
+Threshold, knee and intensity update persistent pass uniform buffers after graph
+retirement, with no extra waits or fresh descriptor allocations. The graph
 retains the provider and GPU state through execution. Disabling bloom adds no bloom
 passes and preserves ordinary forward presentation.
 
@@ -389,3 +395,36 @@ sampling footprints; they are not interchangeable with GGX roughness convolution
 uploads, nonzero LOD sampling, GGX blur and constant-radiance preservation, plus
 prefilter/LUT caching. CPU mip tests verify policies, authored KTX levels,
 non-power-of-two dimensions, volume filtering and HDR/sRGB averaging.
+
+## Native Vulkan command contract
+
+The Vulkan backend uses core `VkPipeline` objects created by `CreatePipeline`.
+Graphics formats, vertex layout, topology, blending and depth/stencil rules are
+explicit `GraphicsPipelineDesc` state. No pipeline is created or selected at draw
+time. `BeginRendering` converts the supplied color, depth and stencil attachments,
+load/clear settings and render area to `vkCmdBeginRendering`; `EndRendering` calls
+`vkCmdEndRendering` once. It never suspends or restarts a rendering scope.
+
+`SetStencilReference` maps to the core dynamic reference command. Stencil testing
+and comparison rules belong to the pipeline. `SetStencil` and `BindTexture` remain
+OpenGL compatibility operations; Vulkan callers use fixed pipeline state and
+explicit descriptor sets.
+
+`ImageBarrier(ImageBarrierDesc)` maps directly to `vkCmdPipelineBarrier2` with the
+caller-specified old/new layouts, subresource range and synchronization masks.
+Descriptor binds do not transition images. Blits require `TransferSource` and
+`TransferDestination` layouts. `GenMipMapsDesc` declares its old/final layouts;
+the mip generator records the requested blits and intermediate mip barriers.
+
+Graph resource access hooks record attachment/sampling transitions before execute
+callbacks. Transfer callbacks explicitly transition their sources/destinations.
+Imported images declare their starting layout; `GetImageLayout` returns the last
+layout declared by initialization or an explicit barrier, not a GPU query.
+Raw command-list users supply their own transitions and synchronization.
+
+Queue submission forwards only the provided command buffers, semaphore waits,
+signals and fence. Swapchain acquisition exposes its acquire/completion semaphores;
+the graph/window view manages those and the final transition to `Present`. Native
+queue submission/presentation does not insert hidden command buffers or barriers.
+Non-core graphics extensions require explicit user authorization; shader objects
+are not used.

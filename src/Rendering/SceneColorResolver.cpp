@@ -83,6 +83,8 @@ void ResolveSceneColor(RenderFeatureContext& frame, RenderFeatureResult& output)
     {
       RenderGraphResource input, encoded, destination;
     };
+    auto set = std::make_shared<SetOwner>(&state->device,
+        state->device.CreateDescriptorSet({.layout=state->resolveSetLayout}));
     const auto& pass = frame.technique.graph.AddPass<Data>(
         "Resolve scene view",
         [source, target](RenderGraph::Builder& builder, Data& data)
@@ -97,15 +99,11 @@ void ResolveSceneColor(RenderFeatureContext& frame, RenderFeatureResult& output)
           data.encoded = builder.Write(data.encoded);
           data.destination = builder.Write(builder.Read(target.image));
         },
-        [state, source, target](const Data& data,
+        [state, source, target, set](const Data& data,
                                 FrameGraphPassResources& resources,
                                 RenderGraphExecutePassContext& execute)
         {
           auto& device = state->device;
-          auto set = std::make_shared<SetOwner>(
-              &device,
-              device.CreateDescriptorSet({.layout = state->resolveSetLayout}));
-          execute.Defer([state, set] {});
           const auto& input = resources.get<RenderGraphImage>(data.input);
           const auto& encoded = resources.get<RenderGraphImage>(data.encoded);
           const std::array writes{
@@ -126,6 +124,7 @@ void ResolveSceneColor(RenderFeatureContext& frame, RenderFeatureResult& output)
           commands.BindDescriptorSet(0, set->set);
           commands.Draw(PrimitiveTopology::TriangleList, 3, 0);
           commands.EndRendering();
+          TransitionImage(commands,encoded.handle,encoded.layout,ImageLayout::TransferSource,encoded.subresource);
           ImageHandle destination;
           switch (target.kind)
           {
@@ -142,6 +141,11 @@ void ResolveSceneColor(RenderFeatureContext& frame, RenderFeatureResult& output)
             destination =
                 resources.get<RenderGraphImage>(data.destination).handle;
             break;
+          }
+          switch(target.kind) {
+          case RenderTargetKind::Window: {const auto& image=resources.get<ImportedWindowView>(data.destination);TransitionImage(commands,image.currentImage,image.layout,ImageLayout::TransferDestination);break;}
+          case RenderTargetKind::ImportedImage: {const auto& image=resources.get<ImportedRenderGraphImage>(data.destination);TransitionImage(commands,image.handle,image.layout,ImageLayout::TransferDestination,image.subresource);break;}
+          case RenderTargetKind::Image: {const auto& image=resources.get<RenderGraphImage>(data.destination);TransitionImage(commands,image.handle,image.layout,ImageLayout::TransferDestination,image.subresource);break;}
           }
           const auto& v = target.viewport;
           commands.MemoryBarrier(

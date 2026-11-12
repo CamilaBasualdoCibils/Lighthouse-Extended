@@ -91,7 +91,7 @@ void main(){ivec2 p=ivec2(gl_FragCoord.xy);color=vec4(length(texelFetch(motion,p
         ImportedRenderGraphImage::Desc{128, 128, ImageFormat::RGBA8,
                                        ImageUsage::ColorAttachment |
                                            ImageUsage::TransferSource},
-        ImportedRenderGraphImage{m_view, m_image});
+        ImportedRenderGraphImage{m_view,m_image,{},m_device.GetImageLayout(m_image)});
     const std::array inputs{
         context.output.auxiliary.at(DeferredSemantics::Motion)[0].image,
         context.output.auxiliary.at(DeferredSemantics::Metallic)[0].image,

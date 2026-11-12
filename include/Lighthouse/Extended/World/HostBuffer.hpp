@@ -4,6 +4,17 @@
 
 namespace Lighthouse
 {
+// Only for render-graph callbacks: Execute retires the previous submission
+// before recording. No individual submit/fence is needed for each host write.
+inline void WriteRetiredHostBuffer(IRenderDevice& device, BufferHandle buffer,
+                                   std::span<const std::byte> bytes)
+{
+  auto mapped=device.MapMemory(buffer);
+  if (bytes.size()>mapped.size()) { device.UnmapMemory(buffer); throw std::out_of_range("Host buffer capacity exceeded"); }
+  std::memcpy(mapped.data(),bytes.data(),bytes.size());
+  device.FlushMappedMemoryRange(buffer,0,bytes.size());
+  device.UnmapMemory(buffer);
+}
 // These application-owned buffers are reused by multiple material passes.
 inline void WriteHostBuffer(Lighthouse::IRenderDevice& device,
                             Lighthouse::BufferHandle buffer,

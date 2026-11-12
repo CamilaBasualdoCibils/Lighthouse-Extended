@@ -1,3 +1,4 @@
+#include "CountingRenderDevice.hpp"
 #include <Lighthouse/Extended/Rendering/Renderer.hpp>
 #include <Lighthouse/Extended/Rendering/Bloom.hpp>
 #include <Lighthouse/Extended/Rendering/DeferredRendering.hpp>
@@ -48,7 +49,11 @@ int main(int argc,char** argv)
     if(vulkan)backend=std::make_unique<VulkanBackend>();else backend=std::make_unique<OpenGLBackend>();
     std::string diagnostic;if(!backend->Initialize(diagnostic))throw std::runtime_error(diagnostic);
     {
-      auto device=backend->CreateDevice({.applicationName="Forward scene test",.queues={{.capabilities=RenderQueueCapability::Graphics|RenderQueueCapability::Compute|RenderQueueCapability::Transfer,.minCount=1}}});
+      auto native=backend->CreateDevice({.applicationName="Forward scene test",.queues={{.capabilities=RenderQueueCapability::Graphics|RenderQueueCapability::Compute|RenderQueueCapability::Transfer,.minCount=1}}});
+      auto device=std::make_unique<CountingRenderDevice>(std::move(native));
+      auto* counters=device.get();
+      counters->forceFixedBindings=std::getenv("LIGHTHOUSE_TEST_FIXED_BINDINGS")!=nullptr;
+      if(vulkan) Check(!device->GetCapabilities().shaderObjects,"Vulkan backend still uses shader objects");
       RenderGraphComposer composer(std::move(device));auto& gpu=*composer.GetRenderDevice();
       const auto resource=Resource::LoadScene(FORWARD_TEST_MODEL);
       auto scene=resource.GetDefaultScene();auto store=std::make_shared<SceneRenderStore>(scene);
@@ -63,7 +68,7 @@ int main(int argc,char** argv)
         auto ref=composer.AddTechnique<Renderer>(&composer);auto* renderer=composer.GetTechnique<Renderer>(ref);
         auto& view=renderer->CreateView(std::make_shared<GraphRenderOutput>([image,imageView,vulkan](TechniqueBuildContext& ctx,const RenderViewFamily& family){
           const auto imageResource=ctx.graph.Import("Test output",ImportedRenderGraphImage::Desc{256,256,ImageFormat::RGBA8,
-            ImageUsage::ColorAttachment|ImageUsage::TransferDestination|ImageUsage::TransferSource},ImportedRenderGraphImage{imageView,image});
+            ImageUsage::ColorAttachment|ImageUsage::TransferDestination|ImageUsage::TransferSource},ImportedRenderGraphImage{imageView,image,{},ctx.device.GetImageLayout(image)});
           return RenderOutputTargets{{family.views[0].id,imageResource,0,0,{0,vulkan?0u:128u,128,128},ImageFormat::RGBA8,RenderColorEncoding::SRGB,RenderTargetKind::ImportedImage}};
         }));
         auto& feature=view.SetRenderFeature<RasterFeature>();
@@ -93,6 +98,12 @@ int main(int argc,char** argv)
         }
         Check(changed>1000&&bright>250,"Helmet did not produce visible lit pixels");
         const auto model=resource.GetModels().front();const auto material=resource.GetMaterials().front();
+        const auto resourceCount=counters->resourceCreations;
+        const auto emptySubmits=counters->emptySubmissions;
+        for(int frame=0;frame<4;++frame) { renderer->Update(0.016f); composer.Render(); }
+        gpu.WaitIdle();
+        Check(counters->resourceCreations==resourceCount,"Steady-state frames created GPU assets");
+        Check(counters->emptySubmissions==emptySubmits,"Steady-state host updates submitted empty queue batches");
         Check(store->GetMesh(gpu,model)==store->GetMesh(gpu,model),"Mesh allocation was duplicated");
         Check(store->GetMaterial(gpu,material)==store->GetMaterial(gpu,material),"Material allocation was duplicated");
         if(const char* path=std::getenv("LIGHTHOUSE_FORWARD_TEST_DUMP")){
@@ -152,6 +163,42 @@ int main(int argc,char** argv)
         renderer->Update(0.016f);composer.Render();gpu.WaitIdle();
         const auto whiteLit=gpu.ReadImage(image);
         Check(white==whiteLit,"Unlit shading model incorrectly used scene lighting");
+        // Different objects, material records and texture indices must all be
+        // selected correctly through a single scene binding group.
+        std::vector<std::pair<entt::entity,Transform>> originalTransforms;
+        for(auto entity:scene.Registry().view<MeshRender,Transform>()) {
+          auto& transform=scene.Registry().get<Transform>(entity);
+          originalTransforms.emplace_back(entity,transform);
+          transform.SetPos(Vec3(100,0,0));
+        }
+        const auto tableDefinition=std::filesystem::path(__FILE__).parent_path()/"Fixtures/SceneTable.material.json";
+        std::vector<entt::entity> tableEntities;
+        for(unsigned i=0;i<2;++i) {
+          std::vector<std::byte> color{std::byte(i==0?255:0),std::byte(i==1?255:0),std::byte{0},std::byte{255}};
+          auto texture=TextureResource::FromImage(Image::FromData(ImageData({1,1},ImageFormat::RGBA8,std::move(color))));
+          auto material=MaterialResource::FromDefinition(tableDefinition,{{"tint",Vec4(i==0?0.8f:0.6f)}});
+          material.SetTexture("color",texture);
+          auto entity=scene.CreateEntity("Scene table test");
+          auto& transform=entity.Add<Transform>();transform.SetPos({i==0?-0.65f:0.65f,0,0});transform.SetScale(Vec3(0.4f));
+          auto& mesh=entity.Add<MeshRender>();mesh.mesh=model;mesh.material=material;
+          tableEntities.push_back(entity.ID());
+        }
+        renderer->Update(0.016f);composer.Compile();composer.Render();gpu.WaitIdle();
+        const auto tablePixels=gpu.ReadImage(image);
+        std::size_t redPixels=0,greenPixels=0;
+        for(std::size_t y=firstRow;y<firstRow+128;++y)for(std::size_t x=0;x<128;++x) {
+          const auto offset=(y*256+x)*4;
+          const auto red=std::to_integer<int>(tablePixels[offset]),green=std::to_integer<int>(tablePixels[offset+1]);
+          if(red>100 && red>green*2) ++redPixels;
+          if(green>100 && green>red*2) ++greenPixels;
+        }
+        Check(redPixels>50 && greenPixels>50,"Scene table mixed up object, material or texture indices");
+        const auto tableResourceCount=counters->resourceCreations;
+        for(int frame=0;frame<3;++frame) {renderer->Update(0.016f);composer.Render();}
+        gpu.WaitIdle();
+        Check(counters->resourceCreations==tableResourceCount,"Scene-table frames allocated GPU assets");
+        for(auto entity:tableEntities) scene.Registry().destroy(entity);
+        for(auto& [entity,transform]:originalTransforms) scene.Registry().get<Transform>(entity)=transform;
         // Always verify real float uploads, including values above one, with
         // a sky-only feature (no geometry, direct lighting or IBL providers).
         std::vector<std::byte> constantBytes(8*4*16);
@@ -193,6 +240,10 @@ int main(int argc,char** argv)
         Check(!renderer->NeedsRebuild(),"Bloom intensity unnecessarily rebuilt the graph");
         composer.Render();gpu.WaitIdle();
         Check(hdrPixels==gpu.ReadImage(image),"Zero bloom intensity changed the scene");
+        const auto bloomResourceCount=counters->resourceCreations;
+        for(int frame=0;frame<3;++frame) {renderer->Update(0.016f);composer.Render();}
+        gpu.WaitIdle();
+        Check(counters->resourceCreations==bloomResourceCount,"Bloom frames allocated GPU assets");
         bloomSettings.Enabled=false; bloom.SetSettings(bloomSettings);renderer->Update(0.016f);
         Check(renderer->NeedsRebuild(),"Disabling bloom did not invalidate graph structure");
         composer.Compile();composer.Render();gpu.WaitIdle();

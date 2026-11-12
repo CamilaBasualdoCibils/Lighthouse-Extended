@@ -81,6 +81,7 @@ void main(){color=vec4(textureLod(source,gl_FragCoord.xy/vec2(64,32),settings.va
   state.pipeline=device.CreatePipeline({.vertexShader=state.vertex,.fragmentShader=state.fragment,
     .colorFormats={ImageFormat::RGBA8},.layout=state.layout});
   auto commands=device.CreateCommandList(0);commands->Begin();
+  commands->ImageBarrier({.image=state.image,.oldLayout=ImageLayout::Undefined,.newLayout=ImageLayout::ColorAttachment});
   commands->BeginRendering({.colorAttachment=state.view,.width=64,.height=32});
   commands->BindPipeline(state.pipeline);commands->BindDescriptorSet(0,state.set);
   commands->Draw(PrimitiveTopology::TriangleList,3,0);commands->EndRendering();commands->End();
@@ -186,7 +187,7 @@ void RenderRoughness(std::unique_ptr<IRenderDevice> device) {
   const auto ref=composer.AddTechnique<Renderer>(&composer);auto* renderer=composer.GetTechnique<Renderer>(ref);
   auto& view=renderer->CreateView(std::make_shared<GraphRenderOutput>([image,imageView](TechniqueBuildContext& ctx,const RenderViewFamily& family){
     const auto resource=ctx.graph.Import("Roughness output",ImportedRenderGraphImage::Desc{256,256,ImageFormat::RGBA8,
-      ImageUsage::ColorAttachment|ImageUsage::TransferDestination|ImageUsage::TransferSource},ImportedRenderGraphImage{imageView,image});
+      ImageUsage::ColorAttachment|ImageUsage::TransferDestination|ImageUsage::TransferSource},ImportedRenderGraphImage{imageView,image,{},ctx.device.GetImageLayout(image)});
     return RenderOutputTargets{{family.views[0].id,resource,0,0,{0,0,256,256},ImageFormat::RGBA8,RenderColorEncoding::SRGB,RenderTargetKind::ImportedImage}};
   }));
   auto& feature=view.SetRenderFeature<ForwardRenderFeature>();feature.AddProvider<SceneProvider>(store);

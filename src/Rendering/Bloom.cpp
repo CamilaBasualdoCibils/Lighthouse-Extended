@@ -1,3 +1,4 @@
+#include <Lighthouse/Extended/World/HostBuffer.hpp>
 #include <Lighthouse/Engine/Assets/ShaderCompiler.hpp>
 #include <Lighthouse/Extended/EmbeddedResources.hpp>
 #include <Lighthouse/Extended/Rendering/Bloom.hpp>
@@ -98,12 +99,14 @@ struct BloomPass
   std::shared_ptr<BloomGPU> gpu;
   BufferHandle parameters{};
   DescriptorSetHandle set{};
+  std::vector<std::tuple<ImageHandle,uint32_t,uint32_t,ImageViewHandle>> views;
   ~BloomPass()
   {
     if (set)
       gpu->device.DestroyDescriptorSet(set);
     if (parameters)
       gpu->device.DestroyBuffer(parameters);
+    for(auto [image,mip,layer,view] : views) gpu->device.DestroyImageView(view);
   }
 };
 struct alignas(16) BloomParameters
@@ -150,6 +153,8 @@ void Bloom::BuildBloom(RenderFeatureContext& frame, RenderFeatureResult& output)
     {
       RenderGraphResource source, bloom, output;
     };
+    auto state=std::make_shared<BloomPass>();
+    state->gpu=gpu;
     const auto& data = graph.AddPass<Data>(
         name,
         [=](RenderGraph::Builder& builder, Data& data)
@@ -164,11 +169,9 @@ void Bloom::BuildBloom(RenderFeatureContext& frame, RenderFeatureResult& output)
                .usage = {ImageUsage::ColorAttachment, ImageUsage::Sampled}}));
         },
         [gpuState = gpu, settings = m_settings, source, bloom, size, region,
-         operation](const Data& data, FrameGraphPassResources& resources,
+         operation, state](const Data& data, FrameGraphPassResources& resources,
                     RenderGraphExecutePassContext& execute)
         {
-          auto state = std::make_shared<BloomPass>();
-          state->gpu = gpuState;
           auto& gpu = *gpuState;
           auto sampleView =
               [&](RenderOutputTarget target, RenderGraphResource resource)
@@ -194,13 +197,14 @@ void Bloom::BuildBloom(RenderFeatureContext& frame, RenderFeatureResult& output)
             }
             if (needsView)
             {
+              for(auto [cachedImage,mip,layer,cachedView] : state->views)
+                if(cachedImage==image && mip==target.mipLevel && layer==target.arrayLayer) return cachedView;
               view = gpu.device.CreateImageView(
                   {.image = image,
                    .format = target.format,
                    .baseMipLevel = target.mipLevel,
                    .baseArrayLayer = target.arrayLayer});
-              execute.Defer([device = &gpu.device, view]
-                            { device->DestroyImageView(view); });
+              state->views.emplace_back(image,target.mipLevel,target.arrayLayer,view);
             }
             return view;
           };
@@ -209,17 +213,14 @@ void Bloom::BuildBloom(RenderFeatureContext& frame, RenderFeatureResult& output)
                float(operation)},
               region,
               {1.0f / size.x, 1.0f / size.y, 0, 0}};
-          // Fresh immutable parameters and bindings are retired with this graph
-          // submission; updating settings never overwrites an in-flight buffer.
-          state->parameters = gpu.device.CreateBuffer(
+          if(!state->parameters) state->parameters = gpu.device.CreateBuffer(
               {.size = sizeof(BloomParameters),
                .usage = BufferUsage::Uniform,
                .initialData = std::as_bytes(std::span(&parameters, 1)),
                .memory = {.requiredAccess =
                               MemoryAccess::CPUWrite | MemoryAccess::GPURead}});
-          state->set =
-              gpu.device.CreateDescriptorSet({.layout = gpu.setLayout});
-          execute.Defer([state] {});
+          if(!state->set) state->set = gpu.device.CreateDescriptorSet({.layout = gpu.setLayout});
+          WriteRetiredHostBuffer(gpu.device,state->parameters,std::as_bytes(std::span(&parameters,1)));
           const std::array writes{
               DescriptorWrite{
                   .binding = 0,

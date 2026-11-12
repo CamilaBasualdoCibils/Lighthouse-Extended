@@ -305,6 +305,10 @@ void TestTexturedWorld(std::unique_ptr<IRenderDevice> device,
                                        PipelineAccess::TransferWrite},
                      .dstStageMask = PipelineStage::Transfer,
                      .dstAccessMask = PipelineAccess::TransferRead});
+                const auto& source=resources.get<RenderGraphImage>(data.image);
+                const auto& destination=resources.get<ImportedRenderGraphImage>(data.output);
+                TransitionImage(*execute.commandList,source.handle,source.layout,ImageLayout::TransferSource,source.subresource);
+                TransitionImage(*execute.commandList,destination.handle,destination.layout,ImageLayout::TransferDestination,destination.subresource);
                 execute.commandList->BlitImage(
                     resources.get<RenderGraphImage>(data.image).handle,
                     resources.get<ImportedRenderGraphImage>(data.output).handle,

@@ -1,0 +1,8 @@
+{
+  "base": "Unlit",
+  "shader": "SceneTable.glsl",
+  "parameters": {
+    "tint": {"type": "vec4", "default": [1, 1, 1, 1]},
+    "color": {"type": "texture2D"}
+  }
+}

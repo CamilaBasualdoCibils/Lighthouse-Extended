@@ -1,3 +1,4 @@
+#include <Lighthouse/Extended/World/HostBuffer.hpp>
 #include <Lighthouse/Engine/Assets/ShaderCompiler.hpp>
 #include <Lighthouse/Extended/EmbeddedResources.hpp>
 #include <Lighthouse/Extended/Rendering/DeferredRendering.hpp>
@@ -76,6 +77,7 @@ struct ShadeBindings
   std::shared_ptr<ShadeState> state;
   DescriptorSetHandle images{}, lights{};
   BufferHandle buffer{};
+  std::size_t capacity{};
   ~ShadeBindings()
   {
     auto& d = state->device;
@@ -127,17 +129,17 @@ DeferredRenderServices::GetMaterial(std::shared_ptr<SceneMaterialGPU> source)
   if (auto it = m_impl->instances.find(source); it != m_impl->instances.end())
     return it->second;
   auto instance =
-      m_impl->materials.Load(source->definition)->Instantiate(source->options);
+      m_impl->materials.Load(source->definition)->Instantiate(source->options, !m_impl->device.GetCapabilities().bindlessResources);
   m_impl->instances.emplace(source, instance);
   return instance;
 }
 GraphicsPipelineHandle
 DeferredRenderServices::GetPipeline(const VertexLayout& vertexLayout,
-                                    std::shared_ptr<SceneMaterialGPU> source)
+                                    std::shared_ptr<SceneMaterialGPU> source, const SceneBindings& bindings)
 {
   auto instance = GetMaterial(source);
   std::ostringstream key;
-  key << instance->material->path.generic_string();
+  key << instance->material->path.generic_string() << ':' << bindings.FrameLayout().index << ':' << bindings.AssetLayout().index;
   for (auto a : vertexLayout.attributes)
     key << ':' << a.location << ',' << int(a.format) << ',' << a.offset;
   for (auto b : vertexLayout.bindings)
@@ -148,12 +150,11 @@ DeferredRenderServices::GetPipeline(const VertexLayout& vertexLayout,
   auto pipeline = std::make_shared<Pipeline>(m_impl->device);
   pipeline->material = instance->material;
   const auto shaders = instance->material->Compile(MaterialRenderPath::Deferred,
-                                                   {}, {}, m_impl->attributes);
+                                                   {}, {}, m_impl->attributes, bindings.ShaderOptions());
   pipeline->vertex = m_impl->device.CreateShaderModule(*shaders.vertex);
   pipeline->fragment = m_impl->device.CreateShaderModule(*shaders.fragment);
   pipeline->layout = m_impl->device.CreatePipelineLayout(
-      {.sets = {instance->material->frameLayout,
-                instance->material->parametersLayout}});
+      {.sets = {bindings.FrameLayout(), bindings.ShaderOptions().bindless ? bindings.AssetLayout() : instance->material->parametersLayout}, .drawIndex=true});
   std::vector<ImageFormat> formats;
   for (auto attribute : m_impl->attributes)
     formats.push_back(GBufferAttributes[std::size_t(attribute)].format);
@@ -163,7 +164,7 @@ DeferredRenderServices::GetPipeline(const VertexLayout& vertexLayout,
                                      .vertexLayout = vertexLayout,
                                      .colorFormats = formats,
                                      .depthFormat = ImageFormat::Depth32,
-                                     .layout = pipeline->layout});
+                                     .layout = pipeline->layout,.depthStencil={.depthTest=true,.depthWrite=true}});
   m_impl->pipelines.emplace(key.str(), pipeline);
   return pipeline->pipeline;
 }
@@ -339,6 +340,10 @@ vec2 ForwardEnvironmentBRDF(float nv,float roughness){return vec2(0);}
                                     .layout = pipeline->layout});
   for (std::size_t view = 0; view < context.gbuffers.size(); ++view)
   {
+    auto bindings=std::make_shared<ShadeBindings>();
+    bindings->state=state;
+    bindings->lights=state->device.CreateDescriptorSet({.layout=state->lights});
+    bindings->images=state->device.CreateDescriptorSet({.layout=state->images});
     struct Data
     {
       RenderGraphResource color, depth;
@@ -359,14 +364,11 @@ vec2 ForwardEnvironmentBRDF(float nv,float roughness){return vec2(0);}
           for (auto resource : dependencies)
             data.dependencies.push_back(builder.Read(resource));
         },
-        [state, lights, ambient, family = context.frame.family, view,
+        [state, bindings, lights, ambient, family = context.frame.family, view,
          indirectSet = context.indirectSet](
             const Data& data, FrameGraphPassResources& resources,
             RenderGraphExecutePassContext& execute)
         {
-          auto bindings = std::make_shared<ShadeBindings>();
-          bindings->state = state;
-          execute.Defer([bindings] {});
           const auto& camera = family->views[view];
           auto records = lights ? lights() : std::vector<LightData>{};
           LightingFrameData header;
@@ -380,21 +382,18 @@ vec2 ForwardEnvironmentBRDF(float nv,float roughness){return vec2(0);}
           if (!records.empty())
             std::memcpy(bytes.data() + sizeof(header), records.data(),
                         records.size() * sizeof(LightData));
-          bindings->buffer = state->device.CreateBuffer(
-              {.size = bytes.size(),
-               .usage = BufferUsage::Storage,
-               .initialData = bytes,
-               .memory = {.requiredAccess =
-                              MemoryAccess::CPUWrite | MemoryAccess::GPURead}});
-          bindings->lights =
-              state->device.CreateDescriptorSet({.layout = state->lights});
+          if(bytes.size()>bindings->capacity) {
+            if(bindings->buffer) state->device.DestroyBuffer(bindings->buffer);
+            bindings->capacity=std::max(bytes.size(),sizeof(LightingFrameData)+256*sizeof(LightData));
+            bindings->buffer=state->device.CreateBuffer({.size=bindings->capacity,.usage=BufferUsage::Storage,
+                .memory={.requiredAccess=MemoryAccess::CPUWrite | MemoryAccess::GPURead}});
+          }
+          WriteRetiredHostBuffer(state->device,bindings->buffer,bytes);
           const std::array writes{DescriptorWrite{
               .binding = 0,
               .resource =
                   DescriptorBufferInfo{bindings->buffer, 0, bytes.size()}}};
           state->device.UpdateDescriptorSet(bindings->lights, writes);
-          bindings->images =
-              state->device.CreateDescriptorSet({.layout = state->images});
           std::vector<DescriptorWrite> imageWrites;
           for (unsigned i = 0; i < 5; ++i)
             imageWrites.push_back(

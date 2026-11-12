@@ -8,16 +8,6 @@
 
 namespace Lighthouse
 {
-ForwardDrawBindings::~ForwardDrawBindings()
-{
-  if (frameSet)
-    device->DestroyDescriptorSet(frameSet);
-  if (lightSet)
-    device->DestroyDescriptorSet(lightSet);
-  if (frame)
-    device->DestroyBuffer(frame);
-  // MaterialInstance owns the shared parameter set and buffer.
-}
 struct ForwardRenderServices::Impl
 {
   IRenderDevice& device;
@@ -74,7 +64,7 @@ struct ForwardRenderServices::Impl
     if (const auto found = instances.find(source); found != instances.end())
       return found->second;
     const auto definition = materials.Load(source->definition);
-    auto instance = definition->Instantiate(source->options);
+    auto instance = definition->Instantiate(source->options, !device.GetCapabilities().bindlessResources);
     instances.emplace(std::move(source), instance);
     return instance;
   }
@@ -93,13 +83,13 @@ ForwardRenderServices::ForwardRenderServices(IRenderDevice& device,
 ForwardRenderServices::~ForwardRenderServices() = default;
 GraphicsPipelineHandle
 ForwardRenderServices::GetPipeline(const VertexLayout& layout,
-                                   std::shared_ptr<SceneMaterialGPU> source)
+                                   std::shared_ptr<SceneMaterialGPU> source, const SceneBindings& bindings)
 {
   m_impl->Initialize();
   const auto material = m_impl->Instance(source)->material;
   const bool blend = source->data.alphaMode == MaterialAsset::AlphaMode::Blend;
   std::ostringstream key;
-  key << material->path.generic_string() << ':' << blend;
+  key << material->path.generic_string() << ':' << blend << ':' << bindings.FrameLayout().index << ':' << bindings.AssetLayout().index;
   for (const auto& b : layout.bindings)
     key << ':' << b.binding << ',' << b.stride << ',' << int(b.inputRate);
   for (const auto& a : layout.attributes)
@@ -112,18 +102,18 @@ ForwardRenderServices::GetPipeline(const VertexLayout& layout,
   pipeline->device = &m_impl->device;
   pipeline->material = material;
   const auto compiled =
-      material->Compile(MaterialRenderPath::Forward, m_impl->lighting, m_impl->indirect);
+      material->Compile(MaterialRenderPath::Forward, m_impl->lighting, m_impl->indirect, {}, bindings.ShaderOptions());
   pipeline->vertex = m_impl->device.CreateShaderModule(*compiled.vertex);
   pipeline->fragment = m_impl->device.CreateShaderModule(*compiled.fragment);
-  std::vector<DescriptorSetLayoutHandle> sets{material->frameLayout, material->parametersLayout, m_impl->lightsLayout};
+  std::vector<DescriptorSetLayoutHandle> sets{bindings.FrameLayout(), bindings.ShaderOptions().bindless ? bindings.AssetLayout() : material->parametersLayout, m_impl->lightsLayout};
   if (m_impl->indirectLayout) sets.push_back(m_impl->indirectLayout);
-  pipeline->layout = m_impl->device.CreatePipelineLayout({.sets = sets});
+  pipeline->layout = m_impl->device.CreatePipelineLayout({.sets = sets,.drawIndex=true});
   GraphicsPipelineDesc desc{.vertexShader = pipeline->vertex,
                             .fragmentShader = pipeline->fragment,
                             .vertexLayout = layout,
                             .colorFormats = {ImageFormat::RGBA16f},
                             .depthFormat = ImageFormat::Depth32,
-                            .layout = pipeline->layout};
+                            .layout = pipeline->layout,.depthStencil={.depthTest=true,.depthWrite=true}};
   if (blend)
     desc.blend = {.enabled = true,
                   .sourceColorFactor = BlendFactor::SourceAlpha,
@@ -134,40 +124,20 @@ ForwardRenderServices::GetPipeline(const VertexLayout& layout,
   m_impl->pipelines.emplace(key.str(), pipeline);
   return pipeline->pipeline;
 }
-std::shared_ptr<ForwardDrawBindings> ForwardRenderServices::CreateBindings(
-    std::shared_ptr<SceneMaterialGPU> material, BufferHandle lights)
+std::shared_ptr<const MaterialInstance> ForwardRenderServices::GetMaterial(std::shared_ptr<SceneMaterialGPU> material)
+{
+  return m_impl->Instance(std::move(material));
+}
+DescriptorSetHandle ForwardRenderServices::IndirectSet() const { return m_impl->indirectSet; }
+DescriptorSetHandle ForwardRenderServices::CreateLightingSet(BufferHandle lights)
 {
   m_impl->Initialize();
-  auto& device = m_impl->device;
-  auto result = std::make_shared<ForwardDrawBindings>();
-  result->device = &device;
-  result->indirectSet = m_impl->indirectSet;
-  result->source = std::move(material);
-  result->instance = m_impl->Instance(result->source);
-  result->frame = device.CreateBuffer(
-      {.size = sizeof(ForwardFrameData),
-       .usage = BufferUsage::Uniform,
-       .memory = {.requiredAccess =
-                      MemoryAccess::CPUWrite | MemoryAccess::GPURead}});
-  result->material = result->instance->parametersBuffer;
-  result->materialSet = result->instance->parametersSet;
-  result->frameSet = device.CreateDescriptorSet(
-      {.layout = result->instance->material->frameLayout});
-  const std::array frameWrites{DescriptorWrite{
-      .binding = 0,
-      .resource =
-          DescriptorBufferInfo{result->frame, 0, sizeof(ForwardFrameData)}}};
-  device.UpdateDescriptorSet(result->frameSet, frameWrites);
-  if (lights)
-  {
-    result->lightSet =
-        device.CreateDescriptorSet({.layout = m_impl->lightsLayout});
-    const auto size = device.GetBufferDesc(lights)->size;
-    const std::array lightWrites{DescriptorWrite{
-        .binding = 0, .resource = DescriptorBufferInfo{lights, 0, size}}};
-    device.UpdateDescriptorSet(result->lightSet, lightWrites);
-  }
-  return result;
+  if (!lights) return {};
+  auto& device=m_impl->device;
+  const auto set=device.CreateDescriptorSet({.layout=m_impl->lightsLayout});
+  const std::array writes{DescriptorWrite{.binding=0,.resource=DescriptorBufferInfo{lights}}};
+  device.UpdateDescriptorSet(set,writes);
+  return set;
 }
 void ForwardRenderServices::BeginGeometry(ForwardRenderContext& ctx)
 {

@@ -21,23 +21,6 @@ SceneDeferredRenderProvider::SceneDeferredRenderProvider(
   if (!m_scene)
     throw std::invalid_argument("Null scene render data");
 }
-namespace
-{
-struct FrameBindings
-{
-  IRenderDevice& device;
-  BufferHandle buffer{};
-  DescriptorSetHandle set{};
-  explicit FrameBindings(IRenderDevice& d) : device(d) {}
-  ~FrameBindings()
-  {
-    if (set)
-      device.DestroyDescriptorSet(set);
-    if (buffer)
-      device.DestroyBuffer(buffer);
-  }
-};
-} // namespace
 void SceneDeferredRenderProvider::BuildGraph(DeferredRenderContext& context)
 {
   if (!context.rendering)
@@ -62,6 +45,7 @@ void SceneDeferredRenderProvider::BuildGraph(DeferredRenderContext& context)
     std::shared_ptr<SceneMaterialGPU> source;
     std::shared_ptr<const MaterialInstance> material;
     GraphicsPipelineHandle pipeline;
+    std::uint32_t index{};
     std::vector<RenderGraphResource> dependencies;
   };
   std::vector<Draw> draws;
@@ -80,17 +64,14 @@ void SceneDeferredRenderProvider::BuildGraph(DeferredRenderContext& context)
     draw.mesh = m_scene->GetMesh(device, instance.mesh);
     draw.source = m_scene->GetMaterial(device, instance.material);
     draw.material = context.rendering->GetMaterial(draw.source);
-    draw.pipeline =
-        context.rendering->GetPipeline(draw.mesh->layout, draw.source);
+    draw.index=draws.size();
     // Alpha-blended surfaces need a forward transparency stage; never silently
     // turn them into opaque G-buffer surfaces.
     if (draw.source->data.alphaMode == MaterialAsset::AlphaMode::Blend)
       spdlog::error("Deferred alpha-blended materials require a transparency compositor");
     draw.dependencies = {
         importBuffer("Deferred mesh vertices", draw.mesh->vertices),
-        importBuffer("Deferred mesh indices", draw.mesh->indices),
-        importBuffer("Deferred material parameters",
-                     draw.material->parametersBuffer)};
+        importBuffer("Deferred mesh indices", draw.mesh->indices)};
     for (const auto& [_, texture] : draw.source->resolvedTextures)
     {
       auto image = texture->sourceImage;
@@ -102,12 +83,19 @@ void SceneDeferredRenderProvider::BuildGraph(DeferredRenderContext& context)
           ImportedRenderGraphImage{
               texture->view,
               texture->image,
-              {ImageAspect::Color, 0, image->mipLevels, 0, 1}}));
+              {ImageAspect::Color, 0, image->mipLevels, 0, 1},ImageLayout::ShaderReadOnly}));
     }
     draws.push_back(std::move(draw));
   }
   for (std::size_t view = 0; view < context.gbuffers.size(); ++view)
   {
+    std::vector<std::shared_ptr<const MaterialInstance>> materials;
+    for(const auto& draw : draws) materials.push_back(draw.material);
+    auto bindings=std::make_shared<SceneBindings>(device,materials);
+    auto viewDraws=draws;
+    for(auto& draw : viewDraws) draw.pipeline=context.rendering->GetPipeline(draw.mesh->layout,draw.source,*bindings);
+    std::vector<RenderGraphResource> globals;
+    for(auto buffer : bindings->Buffers()) globals.push_back(importBuffer("Deferred scene table",buffer));
     struct Data
     {
       std::map<GBufferAttribute, RenderGraphResource> attributes;
@@ -116,20 +104,21 @@ void SceneDeferredRenderProvider::BuildGraph(DeferredRenderContext& context)
     };
     const auto& pass = context.frame.technique.graph.AddPass<Data>(
         "Deferred scene G-buffer",
-        [gbuffer = context.gbuffers[view], draws](RenderGraph::Builder& builder,
+        [gbuffer = context.gbuffers[view], draws=std::move(viewDraws), globals](RenderGraph::Builder& builder,
                                                   Data& data)
         {
           for (auto [attribute, image] : gbuffer.attributes)
             data.attributes[attribute] = builder.Write(builder.Read(image));
           data.depth = builder.Write(builder.Read(gbuffer.depth));
           data.draws = draws;
+          for(auto resource : globals) builder.Read(resource);
           for (auto& draw : data.draws)
             for (auto& resource : draw.dependencies)
               resource = builder.Read(resource);
         },
         [store = m_scene, services = context.rendering, history = m_history,
          family = context.frame.family,
-         view](const Data& data, FrameGraphPassResources& resources,
+         view, bindings](const Data& data, FrameGraphPassResources& resources,
                RenderGraphExecutePassContext& execute)
         {
           const auto& camera = family->views[view];
@@ -163,43 +152,31 @@ void SceneDeferredRenderProvider::BuildGraph(DeferredRenderContext& context)
                .width = camera.resolution.x,
                .height = camera.resolution.y,
                .colorAttachments = attachments});
-          for (const auto& draw : data.draws)
-          {
-            DeferredFrameData frame;
-            frame.viewProjection = camera.ViewProjection();
-            frame.model = store->GetWorldMatrix(draw.entity);
-            frame.previousViewProjection = frame.viewProjection;
-            frame.previousModel = frame.model;
-            if (valid)
-            {
-              if (const auto model = previous->second.models.find(draw.entity);
-                  model != previous->second.models.end())
-              {
-                frame.previousViewProjection = previous->second.viewProjection;
-                frame.previousModel = model->second;
-              }
+          std::vector<SceneObjectData> objects(data.draws.size());
+          for(const auto& draw : data.draws) {
+            auto& object=objects[draw.index];
+            object.model=store->GetWorldMatrix(draw.entity);
+            object.previousModel=object.model;
+            object.material=bindings->MaterialOffsets(draw.index);
+            if(valid) {
+              if(const auto model=previous->second.models.find(draw.entity);model!=previous->second.models.end())
+                object.previousModel=model->second;
             }
-            next.models.emplace(draw.entity, frame.model);
-            auto bindings = std::make_shared<FrameBindings>(*draw.mesh->device);
-            bindings->buffer = bindings->device.CreateBuffer(
-                {.size = sizeof(frame),
-                 .usage = BufferUsage::Uniform,
-                 .initialData = std::as_bytes(std::span(&frame, 1)),
-                 .memory = {.requiredAccess = MemoryAccess::CPUWrite |
-                                              MemoryAccess::GPURead}});
-            bindings->set = bindings->device.CreateDescriptorSet(
-                {.layout = draw.material->material->frameLayout});
-            const std::array writes{DescriptorWrite{
-                .binding = 0,
-                .resource =
-                    DescriptorBufferInfo{bindings->buffer, 0, sizeof(frame)}}};
-            bindings->device.UpdateDescriptorSet(bindings->set, writes);
-            execute.Defer([bindings] {});
-            commands.BindPipeline(draw.pipeline);
-            commands.BindDescriptorSet(0, bindings->set);
-            commands.BindDescriptorSet(1, draw.material->parametersSet);
-            commands.BindVertexBuffer(draw.mesh->vertices,
-                                      sizeof(Mesh3DVertex));
+            next.models.emplace(draw.entity,object.model);
+          }
+          bindings->Update({camera.ViewProjection(),valid ? previous->second.viewProjection : camera.ViewProjection(),Vec4(camera.cameraPosition,1)},objects);
+          GraphicsPipelineHandle current{};
+          bool globalsBound=false;
+          for(const auto& draw : data.draws) {
+            if(current!=draw.pipeline) { commands.BindPipeline(draw.pipeline); current=draw.pipeline; }
+            if(!globalsBound) {
+              commands.BindDescriptorSet(0,bindings->FrameSet());
+              if(bindings->ShaderOptions().bindless) commands.BindDescriptorSet(1,bindings->AssetSet());
+              globalsBound=true;
+            }
+            if(!bindings->ShaderOptions().bindless) commands.BindDescriptorSet(1,draw.material->parametersSet);
+            commands.SetDrawIndex(draw.index);
+            commands.BindVertexBuffer(draw.mesh->vertices,sizeof(Mesh3DVertex));
             commands.BindIndexBuffer(draw.mesh->indices);
             commands.DrawIndexed(draw.mesh->indexCount);
           }

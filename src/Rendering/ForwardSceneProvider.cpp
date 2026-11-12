@@ -1,6 +1,6 @@
 #include <Lighthouse/Extended/Rendering/ForwardRendering.hpp>
 #include <Lighthouse/Extended/Rendering/SceneProvider.hpp>
-#include <Lighthouse/Extended/World/HostBuffer.hpp>
+
 #include <algorithm>
 
 namespace Lighthouse
@@ -24,7 +24,9 @@ void SceneForwardRenderProvider::BuildGraph(ForwardRenderContext& ctx)
   {
     entt::entity entity;
     std::shared_ptr<SceneMeshGPU> mesh;
-    std::shared_ptr<ForwardDrawBindings> bindings;
+    std::shared_ptr<SceneMaterialGPU> source;
+    std::shared_ptr<const MaterialInstance> material;
+    std::uint32_t index{};
     GraphicsPipelineHandle pipeline;
     std::vector<RenderGraphResource> resources;
   };
@@ -37,14 +39,12 @@ void SceneForwardRenderProvider::BuildGraph(ForwardRenderContext& ctx)
       draw.entity = instance.entity;
       draw.mesh = m_scene->GetMesh(device, instance.mesh);
       const auto material = m_scene->GetMaterial(device, instance.material);
-      draw.pipeline = ctx.rendering->GetPipeline(draw.mesh->layout, material);
-      draw.bindings =
-          ctx.rendering->CreateBindings(material, ctx.lightingBuffer);
+      draw.source = material;
+      draw.material = ctx.rendering->GetMaterial(material);
+      draw.index = draws.size();
       draw.resources = {
           importBuffer("Forward mesh vertices", draw.mesh->vertices),
-          importBuffer("Forward mesh indices", draw.mesh->indices),
-          importBuffer("Forward instance frame", draw.bindings->frame),
-          importBuffer("Forward material parameters", draw.bindings->material)};
+          importBuffer("Forward mesh indices", draw.mesh->indices)};
       for (const auto& [_, texture] : material->resolvedTextures)
       {
         const auto size = texture->sourceImage->resolution;
@@ -53,10 +53,22 @@ void SceneForwardRenderProvider::BuildGraph(ForwardRenderContext& ctx)
             ImportedRenderGraphImage::Desc{size.x, size.y, texture->sourceImage->format,
                                            ImageUsage::Sampled},
             ImportedRenderGraphImage{texture->view, texture->image,
-                {ImageAspect::Color, 0, texture->sourceImage->mipLevels, 0, 1}}));
+                {ImageAspect::Color, 0, texture->sourceImage->mipLevels, 0, 1},ImageLayout::ShaderReadOnly}));
       }
       draws.push_back(std::move(draw));
     }
+    std::vector<std::shared_ptr<const MaterialInstance>> materials;
+    for (const auto& draw : draws) materials.push_back(draw.material);
+    auto bindings = std::make_shared<SceneBindings>(device, materials);
+    for (auto& draw : draws) draw.pipeline=ctx.rendering->GetPipeline(draw.mesh->layout, draw.source, *bindings);
+    struct LightingSet {
+      IRenderDevice& device;
+      DescriptorSetHandle set;
+      ~LightingSet() { if(set) device.DestroyDescriptorSet(set); }
+    };
+    auto lightSet=std::shared_ptr<LightingSet>(new LightingSet{device,ctx.rendering->CreateLightingSet(ctx.lightingBuffer)});
+    std::vector<RenderGraphResource> globals;
+    for(auto buffer : bindings->Buffers()) globals.push_back(importBuffer("Forward scene table",buffer));
     struct Data
     {
       RenderGraphResource color, depth;
@@ -69,7 +81,7 @@ void SceneForwardRenderProvider::BuildGraph(ForwardRenderContext& ctx)
     const auto& pass = ctx.frame.technique.graph.AddPass<Data>(
         "Forward scene geometry",
         [color, depth, draws = std::move(draws),
-         lights = ctx.lights](RenderGraph::Builder& builder, Data& data)
+         lights = ctx.lights, globals](RenderGraph::Builder& builder, Data& data)
         {
           data.color = builder.Write(builder.Read(color));
           data.depth = builder.Write(builder.Read(depth));
@@ -77,11 +89,11 @@ void SceneForwardRenderProvider::BuildGraph(ForwardRenderContext& ctx)
           for (auto& draw : data.draws)
             for (auto& resource : draw.resources)
               resource = builder.Read(resource);
-          for (auto resource : lights)
-            data.lights.push_back(builder.Read(resource));
+          for (auto resource : lights) data.lights.push_back(builder.Read(resource));
+          for (auto resource : globals) data.lights.push_back(builder.Read(resource));
         },
         [store = m_scene, services = ctx.rendering, family = ctx.frame.family,
-         view](const Data& data, FrameGraphPassResources& resources,
+         view, bindings, lightSet](const Data& data, FrameGraphPassResources& resources,
                RenderGraphExecutePassContext& execute)
         {
           const auto& camera = family->views[view];
@@ -92,9 +104,9 @@ void SceneForwardRenderProvider::BuildGraph(ForwardRenderContext& ctx)
               sorted.begin(), sorted.end(),
               [&](const Draw* a, const Draw* b)
               {
-                const bool ablend = a->bindings->source->data.alphaMode ==
+                const bool ablend = a->source->data.alphaMode ==
                                     MaterialAsset::AlphaMode::Blend;
-                const bool bblend = b->bindings->source->data.alphaMode ==
+                const bool bblend = b->source->data.alphaMode ==
                                     MaterialAsset::AlphaMode::Blend;
                 if (ablend != bblend)
                   return !ablend;
@@ -108,14 +120,14 @@ void SceneForwardRenderProvider::BuildGraph(ForwardRenderContext& ctx)
                 }
                 return a->pipeline.index < b->pipeline.index;
               });
-          for (const auto* draw : sorted)
-          {
-            ForwardFrameData frame{camera.ViewProjection(),
-                                   store->GetWorldMatrix(draw->entity),
-                                   Vec4(camera.cameraPosition, 1)};
-            WriteHostBuffer(*draw->bindings->device, draw->bindings->frame,
-                            std::as_bytes(std::span(&frame, 1)));
+          std::vector<SceneObjectData> objects(data.draws.size());
+          for(const auto& draw : data.draws) {
+            auto& object=objects[draw.index];
+            object.model=store->GetWorldMatrix(draw.entity);
+            object.previousModel=object.model;
+            object.material=bindings->MaterialOffsets(draw.index);
           }
+          bindings->Update({camera.ViewProjection(),camera.ViewProjection(),Vec4(camera.cameraPosition,1)},objects);
           auto& commands = *execute.commandList;
           // Preserve attachments written by the clear pass or an earlier
           // provider.
@@ -140,21 +152,23 @@ void SceneForwardRenderProvider::BuildGraph(ForwardRenderContext& ctx)
                .width = camera.resolution.x,
                .height = camera.resolution.y});
           GraphicsPipelineHandle current{};
+          bool globalsBound=false;
           for (const auto* draw : sorted)
           {
-            if (current != draw->pipeline)
-            {
-              commands.BindPipeline(draw->pipeline);
-              current = draw->pipeline;
+            const bool changed=current!=draw->pipeline;
+            if(changed) { commands.BindPipeline(draw->pipeline); current=draw->pipeline; }
+            if(!globalsBound) {
+              commands.BindDescriptorSet(0,bindings->FrameSet());
+              if(bindings->ShaderOptions().bindless) commands.BindDescriptorSet(1,bindings->AssetSet());
             }
-            commands.BindDescriptorSet(0, draw->bindings->frameSet);
-            commands.BindDescriptorSet(1, draw->bindings->materialSet);
-            if (draw->bindings->lightSet)
-              commands.BindDescriptorSet(2, draw->bindings->lightSet);
-            if (draw->bindings->indirectSet)
-              commands.BindDescriptorSet(3, draw->bindings->indirectSet);
-            commands.BindVertexBuffer(draw->mesh->vertices,
-                                      sizeof(Mesh3DVertex));
+            if(!globalsBound || (changed && !bindings->ShaderOptions().bindless)) {
+              if(lightSet->set) commands.BindDescriptorSet(2,lightSet->set);
+              if(services->IndirectSet()) commands.BindDescriptorSet(3,services->IndirectSet());
+            }
+            globalsBound=true;
+            if(!bindings->ShaderOptions().bindless) commands.BindDescriptorSet(1,draw->material->parametersSet);
+            commands.SetDrawIndex(draw->index);
+            commands.BindVertexBuffer(draw->mesh->vertices,sizeof(Mesh3DVertex));
             commands.BindIndexBuffer(draw->mesh->indices);
             commands.DrawIndexed(draw->mesh->indexCount);
           }

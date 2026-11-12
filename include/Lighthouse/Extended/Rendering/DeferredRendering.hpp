@@ -16,7 +16,7 @@ public:
   ~DeferredRenderServices();
   void BeginGeometry(DeferredRenderContext&);
   GraphicsPipelineHandle GetPipeline(const VertexLayout&,
-                                     std::shared_ptr<SceneMaterialGPU>);
+                                     std::shared_ptr<SceneMaterialGPU>, const SceneBindings&);
   std::shared_ptr<const MaterialInstance>
       GetMaterial(std::shared_ptr<SceneMaterialGPU>);
   const std::vector<GBufferAttribute>& Attributes() const;

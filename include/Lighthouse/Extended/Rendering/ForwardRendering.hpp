@@ -4,6 +4,7 @@
 #include <Lighthouse/Extended/Resources/Material.hpp>
 #include <Lighthouse/Extended/Resources/Model.hpp>
 #include <array>
+#include <Lighthouse/Extended/Rendering/SceneBindings.hpp>
 
 namespace Lighthouse
 {
@@ -49,16 +50,6 @@ struct alignas(16) ForwardFrameData
   Mat4 viewProjection{1}, model{1};
   Vec4 cameraPosition{};
 };
-struct ForwardDrawBindings
-{
-  IRenderDevice* device{};
-  BufferHandle frame{}, material{};
-  DescriptorSetHandle frameSet{}, materialSet{}, lightSet{}, indirectSet{};
-  std::shared_ptr<SceneMaterialGPU> source;
-  std::shared_ptr<const MaterialInstance> instance;
-  ~ForwardDrawBindings();
-};
-
 // Owned by the feature. Providers request compatible pipelines/bindings, then record draws.
 class ForwardRenderServices
 {
@@ -68,8 +59,10 @@ public:
                         DescriptorSetLayoutHandle indirectLayout = {},
                         DescriptorSetHandle indirectSet = {});
   ~ForwardRenderServices();
-  GraphicsPipelineHandle GetPipeline(const VertexLayout&, std::shared_ptr<SceneMaterialGPU>);
-  std::shared_ptr<ForwardDrawBindings> CreateBindings(std::shared_ptr<SceneMaterialGPU>, BufferHandle lights);
+  GraphicsPipelineHandle GetPipeline(const VertexLayout&, std::shared_ptr<SceneMaterialGPU>, const SceneBindings&);
+  std::shared_ptr<const MaterialInstance> GetMaterial(std::shared_ptr<SceneMaterialGPU>);
+  DescriptorSetHandle CreateLightingSet(BufferHandle lights);
+  DescriptorSetHandle IndirectSet() const;
   void BeginGeometry(ForwardRenderContext&);
   void Resolve(RenderFeatureContext&, RenderFeatureResult&);
 private:

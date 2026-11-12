@@ -168,11 +168,14 @@ void TestMaterialPixels(
       device.CreateImageView({.image = depth, .format = ImageFormat::Depth24Stencil8});
   auto commands = device.CreateCommandList(0);
   commands->Begin();
+  for(auto attribute:attributes) commands->ImageBarrier({.image=attribute,.oldLayout=ImageLayout::Undefined,.newLayout=ImageLayout::ColorAttachment});
+  commands->ImageBarrier({.image=depth,.oldLayout=ImageLayout::Undefined,.newLayout=ImageLayout::DepthStencilAttachment,
+      .subresource={{ImageAspect::Depth,ImageAspect::Stencil},0,1,0,1}});
   commands->BeginRendering({.depthAttachment = depthView,
                             .clearColor = true, .clearDepth = true,
-                            .width = 128, .height = 128, .colorAttachments = views});
-  commands->SetStencil(StencilMode::Write, 1);
+                            .width = 128, .height = 128, .colorAttachments = views,.stencilAttachment=depthView});
   commands->BindPipeline(material->gBufferPipeline);
+  commands->SetStencilReference(1);
   commands->BindDescriptorSet(0, set);
   commands->BindDescriptorSet(1, instance->parametersSet);
   commands->BindVertexBuffer(vertexBuffer, sizeof(Mesh3DVertex));
@@ -194,10 +197,12 @@ void TestMaterialPixels(
   {
   commands->Clear();
   commands->Begin();
+  commands->ImageBarrier({.image=image,.oldLayout=ImageLayout::Undefined,.newLayout=ImageLayout::ColorAttachment});
+  for(auto attribute:attributes) commands->ImageBarrier({.image=attribute,.oldLayout=ImageLayout::ColorAttachment,.newLayout=ImageLayout::ShaderReadOnly});
   commands->BeginRendering({.colorAttachment = view, .depthAttachment = depthView,
-      .clearColor = true, .width = 128, .height = 128, .depthReadOnly = true});
-  commands->SetStencil(StencilMode::Equal, 1);
+      .clearColor = true, .width = 128, .height = 128,.stencilAttachment=depthView});
   commands->BindPipeline(lighting.pipeline);
+  commands->SetStencilReference(1);
   commands->BindDescriptorSet(0, lightingSet);
   commands->Draw(PrimitiveTopology::TriangleList, 3, 0);
   commands->EndRendering();
@@ -211,7 +216,10 @@ void TestMaterialPixels(
   const Lighthouse::BlitRegion region{
       .srcSubresource={ImageAspect::Color,0,0,1}, .srcOffsets={{{0,0,0},{128,128,1}}},
       .dstSubresource={ImageAspect::Color,0,0,1}, .dstOffsets={{{0,0,0},{128,128,1}}}};
-  commands->BlitImage(material->model==SurfaceModel::Lit ? attributes.front() : image,readback,region,ImageFilter::Nearest);
+  const auto source=material->model==SurfaceModel::Lit ? attributes.front() : image;
+  commands->ImageBarrier({.image=source,.oldLayout=ImageLayout::ColorAttachment,.newLayout=ImageLayout::TransferSource});
+  commands->ImageBarrier({.image=readback,.oldLayout=ImageLayout::Undefined,.newLayout=ImageLayout::TransferDestination});
+  commands->BlitImage(source,readback,region,ImageFilter::Nearest);
   commands->End();
   SubmitAndWait(device, *commands);
   const auto pixels = device.ReadImage(readback);

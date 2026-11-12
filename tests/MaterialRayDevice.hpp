@@ -125,6 +125,7 @@ public:
   {
     return device.CreateCommandList(queueIndex);
   }
+  Lighthouse::ImageLayout GetImageLayout(Lighthouse::ImageHandle image) const override {return device.GetImageLayout(image);}
   Lighthouse::SurfaceHandle CreateSurface(Lighthouse::Window& w) override
   {
     return device.CreateSurface(w);

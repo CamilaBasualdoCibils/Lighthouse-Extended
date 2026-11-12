@@ -77,6 +77,8 @@ public:
                  .srcAccessMask = PipelineAccess::ColorAttachmentWrite,
                  .dstStageMask = PipelineStage::Transfer,
                  .dstAccessMask = PipelineAccess::TransferRead});
+            TransitionImage(commands,blank.handle,blank.layout,ImageLayout::TransferSource,blank.subresource);
+            TransitionImage(commands,destination.currentImage,destination.layout,ImageLayout::TransferDestination);
             commands.BlitImage(
                 blank.handle, destination.currentImage,
                 {.srcSubresource = {ImageAspect::Color, 0, 0, 1},
@@ -159,7 +161,7 @@ public:
 
     const auto technique = composer.AddTechnique<Renderer>(&composer);
     m_renderer = composer.GetTechnique<Renderer>(technique);
-    const auto resource = Resource::LoadScene("/home/camila/Downloads/sponza/main_sponza/NewSponza_Main_glTF_003.gltf");
+    const auto resource = Resource::LoadScene("DamagedHelmet.gltf");
     m_scene = std::make_unique<Scene>(resource.GetDefaultScene());
     m_store = std::make_shared<SceneRenderStore>(*m_scene);
     const auto addLight =
