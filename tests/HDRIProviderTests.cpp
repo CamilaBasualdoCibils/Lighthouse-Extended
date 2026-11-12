@@ -113,3 +113,62 @@ TEST(ResourceImage, STBDecodesPNGAndJPEGToRGBA8) {
     }
   }
 }
+
+namespace
+{
+struct ForwardOnlySky final : IForwardSkyProvider
+{
+  void BuildGraphForward(ForwardRenderContext&) override {}
+};
+struct DeferredOnlySky final : IDeferredSkyProvider
+{
+  void BuildGraphDeferred(DeferredRenderContext&) override {}
+};
+struct ForwardOnlyEnvironment final : IForwardEnvironmentProvider
+{
+  IForwardSkyProvider* GetForwardSky() const override { return nullptr; }
+};
+struct DeferredOnlyEnvironment final : IDeferredEnvironmentProvider
+{
+  IDeferredSkyProvider* GetDeferredSky() const override { return nullptr; }
+};
+template<class T> concept ForwardEnvironmentAccepted = requires(ForwardRenderFeature& feature)
+{ feature.template SetEnvironmentProvider<T>(); };
+template<class T> concept DeferredEnvironmentAccepted = requires(DeferredRenderFeature& feature)
+{ feature.template SetEnvironmentProvider<T>(); };
+static_assert(ForwardEnvironmentAccepted<ForwardOnlyEnvironment>);
+static_assert(!DeferredEnvironmentAccepted<ForwardOnlyEnvironment>);
+static_assert(DeferredEnvironmentAccepted<DeferredOnlyEnvironment>);
+static_assert(!ForwardEnvironmentAccepted<DeferredOnlyEnvironment>);
+static_assert(!std::derived_from<IForwardEnvironmentProvider,IDeferredProvider>);
+static_assert(!std::derived_from<IDeferredEnvironmentProvider,IForwardProvider>);
+static_assert(!std::derived_from<IForwardSkyProvider,IDeferredProvider>);
+static_assert(!std::derived_from<IDeferredSkyProvider,IForwardProvider>);
+static_assert(!std::derived_from<IForwardIndirectLightingProvider,IDeferredProvider>);
+static_assert(!std::derived_from<IDeferredIndirectLightingProvider,IForwardProvider>);
+static_assert(!std::constructible_from<EnvironmentProvider,std::shared_ptr<ForwardOnlySky>>);
+static_assert(!std::constructible_from<EnvironmentProvider,std::shared_ptr<DeferredOnlySky>>);
+static_assert(ForwardEnvironmentAccepted<EnvironmentProvider> && DeferredEnvironmentAccepted<EnvironmentProvider>);
+static_assert(std::derived_from<HDRISkyProvider,IForwardSkyProvider> && std::derived_from<HDRISkyProvider,IDeferredSkyProvider>);
+static_assert(std::derived_from<HDRIIndirectLightingProvider,IForwardIndirectLightingProvider> && std::derived_from<HDRIIndirectLightingProvider,IDeferredIndirectLightingProvider>);
+}
+TEST(HDRI, ExplicitDualPipelineEnvironmentKeepsOneProviderLifecycle)
+{
+  struct BothSky final : IForwardSkyProvider, IDeferredSkyProvider
+  {
+    int updates{};
+    void Update(RenderUpdateContext&) override { ++updates; }
+    void BuildGraphForward(ForwardRenderContext&) override {}
+    void BuildGraphDeferred(DeferredRenderContext&) override {}
+  };
+  auto sky=std::make_shared<BothSky>();
+  EnvironmentProvider environment(sky);
+  auto* forward=static_cast<IForwardEnvironmentProvider*>(&environment);
+  auto* deferred=static_cast<IDeferredEnvironmentProvider*>(&environment);
+  EXPECT_EQ(static_cast<IRenderProvider*>(forward),static_cast<IRenderProvider*>(deferred));
+  EXPECT_EQ(static_cast<IRenderProvider*>(environment.GetForwardSky()),static_cast<IRenderProvider*>(environment.GetDeferredSky()));
+  ResourceRequests resources;
+  RenderUpdateContext update{resources};
+  environment.Update(update);
+  EXPECT_EQ(sky->updates,1);
+}

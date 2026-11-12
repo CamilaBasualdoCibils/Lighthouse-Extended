@@ -170,9 +170,10 @@ void RendererTool::Draw(const std::shared_ptr<Diagram>& candidate)
   for (const auto& node : diagram->nodes)
   {
     ed::SetNodePosition(ed::NodeId(node.id), node.position);
-    ed::PushStyleColor(ed::StyleColor_NodeBg, node.pass
-                                                  ? ImVec4(1, .65f, 0, 1)
-                                                  : ImVec4(.53f, .81f, .9f, 1));
+    const ImVec4 nodeColor = node.pass ? ImVec4(1, .65f, 0, 1)
+                                      : node.imported ? ImVec4(.55f, .55f, .55f, 1)
+                                                      : ImVec4(.53f, .81f, .9f, 1);
+    ed::PushStyleColor(ed::StyleColor_NodeBg, nodeColor);
     ed::PushStyleColor(ed::StyleColor_NodeBorder, ImVec4(0, 0, 0, 1));
     ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0, 0, 0, 1));
     ed::BeginNode(ed::NodeId(node.id));

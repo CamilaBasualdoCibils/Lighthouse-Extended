@@ -1,6 +1,7 @@
 #pragma once
-#include <Lighthouse/Extended/Rendering/RenderFeatures.hpp>
+#include <Lighthouse/Extended/Rendering/IRenderFeature.hpp>
 #include <functional>
+#include <concepts>
 #include <memory>
 
 namespace Lighthouse

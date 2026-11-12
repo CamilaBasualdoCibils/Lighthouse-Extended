@@ -1,5 +1,7 @@
 #pragma once
-#include <Lighthouse/Extended/Rendering/RenderFeatures.hpp>
+#include <Lighthouse/Extended/Rendering/ForwardRenderFeature.hpp>
+#include <Lighthouse/Extended/Rendering/DeferredRenderFeature.hpp>
+#include <Lighthouse/Extended/Rendering/PathTracingRenderFeature.hpp>
 #include <Lighthouse/Extended/Rendering/DrawCollector.hpp>
 #include <Lighthouse/Extended/World/Entity/MeshRender.hpp>
 #include <Lighthouse/Extended/World/Scene.hpp>
@@ -56,12 +58,14 @@ using SceneRenderData = SceneRenderStore;
 class SceneDeferredRenderProvider : public IDeferredGeometryProvider
 {
 public:
-  explicit SceneDeferredRenderProvider(std::shared_ptr<SceneRenderStore> scene) : m_scene(std::move(scene))
-  { if (!m_scene) throw std::invalid_argument("Null scene render data"); }
+  explicit SceneDeferredRenderProvider(std::shared_ptr<SceneRenderStore> scene);
   void Update(RenderUpdateContext& ctx) override { m_scene->Update(ctx); }
-  void BuildGraph(DeferredRenderContext&) override {} // Raster rendering intentionally deferred.
+  std::uint64_t GetConfigurationRevision() const noexcept override { return m_scene->GetRevision(); }
+  void BuildGraph(DeferredRenderContext&) override;
   const SceneRenderStore& GetSceneData() const { return *m_scene; }
 private:
+  struct History;
+  std::shared_ptr<History> m_history;
   std::shared_ptr<SceneRenderStore> m_scene;
 };
 class SceneForwardRenderProvider : public IForwardGeometryProvider

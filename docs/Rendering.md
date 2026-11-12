@@ -9,8 +9,9 @@ This implementation provides interfaces, typed provider ownership, update calls,
 graph assembly, destination mapping, and configuration lifetime management.
 Forward rendering now includes a scene provider, shared `SceneRenderStore`, glTF
 metallic/roughness material textures, scene-component lighting, depth attachments,
-and SDR tone mapping/output resolve. Deferred/path-tracing rendering, clustered
-light assignment, shadows and reflections remain scaffolds. `ResourceRequests`
+and SDR tone mapping/output resolve. Deferred rendering uses the same scene store,
+materials, BRDF and HDRI inputs with a G-buffer followed by fullscreen lighting.
+Path tracing, clustered light assignment, shadows and reflections remain scaffolds. `ResourceRequests`
 remains a stub; scene allocations are cached in the shared store, not in it.
 
 ## One view
@@ -24,13 +25,12 @@ view.SetViewFamily({{RenderViewData{.id = 1}}});
 auto& deferred = view.SetRenderFeature<DeferredRenderFeature>();
 deferred.AddProvider<SceneDeferredRenderProvider>(sceneData);
 // deferred.AddProvider<MyTerrainDeferredProvider>(terrain);
-// deferred.SetLighting<MyDeferredLighting>();
+deferred.SetLighting<DefaultDeferredLightingProvider>(sceneData);
 // deferred.SetShadows<MyDeferredShadows>();
 // deferred.SetReflections<MyDeferredReflections>();
 // deferred.AddCompositor<MySplatCompositor>(splats);
 // deferred.AddDeferredPostProcess<MyDeferredEffect>();
-// deferred.AddPostProcess<MyCommonEffect>();
-// deferred.SetOutputResolver<MyToneMapAndResolve>();
+deferred.AddDeferredPostProcess<Bloom>();
 
 renderer.Update(deltaTime);
 if (renderer.NeedsRebuild()) composer.Compile();
@@ -52,6 +52,11 @@ history inside each feature/provider; switching features creates a new instance.
 
 ## Features and providers
 
+Each feature's contexts, semantics, provider interfaces and feature class live in
+its own header: `ForwardRenderFeature.hpp`, `DeferredRenderFeature.hpp`, or
+`PathTracingRenderFeature.hpp`. `Renderer.hpp` depends only on the minimal
+`IRenderFeature` contract. Include the concrete feature headers you use.
+
 - `DeferredRenderFeature`: multiple `IDeferredGeometryProvider`s, one each of
   lighting/shadows/reflections, multiple compositors and deferred post-processes.
 - `ForwardRenderFeature`: corresponding forward contracts. Forward lighting
@@ -70,11 +75,13 @@ supporting both techniques has one common provider subobject.
 compositors and before the feature's final tone mapping/output resolution.
 `IDeferredPostProcess::BuildGraphDeferred(DeferredRenderContext&)` is the separate
 deferred contract. Deferred providers declare attachment/history requirements with
-`GetDeferredDependencies()`. Missing post-process requirements fail graph building.
+`GetDeferredDependencies()`. The feature gathers every registered provider's requests
+before building geometry. Providers report dependency changes through
+`GetConfigurationRevision()`, which invalidates the feature's cached graph.
+Requested attachments are allocated and written by the G-buffer pass.
 `ForwardSemantics` and `DeferredSemantics` describe independent auxiliary maps;
 deferred temporal history is a separate map keyed by `DeferredHistory`. No feature
-promises another technique's outputs. Deferred and path-tracing features retain
-their orchestration scaffolds; this does not add their rendering implementations.
+promises another technique's outputs. Path tracing retains its orchestration scaffold.
 
 Scene adapters can share `SceneRenderStore`, retaining scene change tracking across
 views and feature changes. Each provider owns its batching/render implementation;
@@ -90,25 +97,61 @@ using pipelines and binding layouts supplied by the feature. `DefaultForwardLigh
 extracts enabled directional, point and spot `Light` components, including parent
 transforms. The initial implementation uses up to 256 unshadowed lights, PNG/JPEG
 textures, UV set zero and a single uploaded mip level. The default output resolver
-supports SDR sRGB destinations. Deferred geometry and ray tracing remain stubs.
+supports SDR sRGB destinations. Ray tracing remains a scaffold.
 
 `Resource::LoadScene(path)` parses a scene resource. `resource.GetDefaultScene()`
 instantiates its default scene. Those operations remain CPU-side; the shared render store resolves
 referenced meshes and images when the scene provider builds its rendering passes.
 
-The RenderFeatures example uses this flow to display DamagedHelmet in its top-left
-quadrant, with three ordinary scene light entities, Newport Loft HDRI sky and image-based
-lighting and GPU bloom. The Render Feature Settings tool exposes Forward, Deferred,
-and PathTrace tabs; only Forward currently contains controls for bloom enable, mip
-levels, threshold, soft knee and intensity. The scene contains only the original
-helmet. Other quadrants remain empty.
+The RenderFeatures example displays the same DamagedHelmet scene with forward
+rendering in the top-left quadrant and deferred rendering in the top-right. Both
+share one SceneRenderStore, camera, lights and HDRI environment, with separate Bloom
+instances. Forward and Deferred tabs expose their bloom settings; PathTrace and the
+bottom quadrants remain empty. No duplicate scene mesh is added.
+
+## Deferred rendering
+
+Include `DeferredRendering.hpp` for `DeferredRenderServices` and
+`DefaultDeferredLightingProvider`. Register `SceneDeferredRenderProvider` with the
+same SceneRenderStore used by forward rendering. EnvironmentProvider and
+HDRIIndirectLightingProvider explicitly support both raster provider roots; their
+deferred contracts still remain separate from forward geometry/lighting interfaces.
+
+The G-buffer contains linear albedo, world normal, world position, packed material
+properties, emission and depth for the baseline material lighting pass. Providers
+can additionally request `Motion`, `Metallic` and `Roughness`. These use RG16f,
+R16f and R16f attachments respectively and are omitted when unrequested. All
+requests are unioned across preparation, geometry, lighting, shadows, reflections,
+compositors, post-processes, environment and indirect-lighting providers. Materials
+compile the exact ordered output layout selected by the deferred feature. Lit and
+Unlit materials write every selected output; packed properties identify which
+shading model the fullscreen pass evaluates.
+
+Motion stores current minus previous clip-derived UV coordinates. Previous model
+and view/projection matrices are committed only after graph submission, keyed by
+logical view and entity. First-frame and resized-view motion starts at zero, and
+motion with invalid previous clip W is rejected. Moving cameras/objects use live
+state without recompilation. Temporal *image* history remains separate and must be
+supplied explicitly by a preparation provider if requested.
+
+Deferred lighting evaluates the same surface BRDF, direct scene-light records and
+split-sum HDRI lighting as forward. It preserves the sky wherever depth is clear,
+then runs reflections, compositors and `BuildGraphDeferred` post-processes. The
+same Bloom class processes the HDR result before the common scene-color resolver.
+Bindings/frame buffers are immutable per submission and retired through RenderGraph.
+No new per-frame waits or manually managed command-list Begin/End are introduced.
+
+The scene G-buffer pass handles opaque and alpha-masked materials. Alpha-blended
+materials require a transparency compositor and are explicitly rejected by that
+pass rather than silently becoming opaque. Shadows/reflections still require
+providers; this implementation does not invent those algorithms.
 
 ## Bloom
 
 `Bloom` implements both post-process interfaces and shares one internal graph
 builder. Install it with `forward.AddForwardPostProcess<Bloom>(BloomSettings{})`.
-The deferred entry point compiles against the deferred context without introducing
-a deferred renderer. It requires linear scene color, not a display-encoded target.
+Both entry points share the same implementation; the deferred feature runs its
+entry point after deferred lighting. It requires linear scene color, not a display-encoded target.
 
 The graph renders highlight extraction with threshold/soft knee into a half-size
 RGBA16f image. The first reduction uses grouped, luminance-weighted filtering
@@ -217,18 +260,31 @@ forward.SetEnvironmentProvider<EnvironmentProvider>(
 forward.SetIndirectLightingProvider<HDRIIndirectLightingProvider>(hdri);
 ```
 
-`IEnvironmentProvider` exposes `ISkyProvider`. Sky records a separate fullscreen
-pass into scene-linear RGBA16f color before geometry, leaving depth available for
-opaque and transparent objects. Its graph contract takes `RenderFeatureContext`
-and `RenderFeatureResult`, so another rendering feature can reuse it. Sky uses
-live projection and view rotation; camera translation does not move the sky.
+Environment and sky compatibility is pipeline-specific:
 
-`IIndirectLightingProvider` prepares graph dependencies and contributes GLSL plus
-its descriptor layout/set at set 3. Its shader exposes
+- `IForwardEnvironmentProvider::GetForwardSky()` returns an `IForwardSkyProvider`,
+  whose entry point is `BuildGraphForward(ForwardRenderContext&)`.
+- `IDeferredEnvironmentProvider::GetDeferredSky()` returns an `IDeferredSkyProvider`,
+  whose entry point is `BuildGraphDeferred(DeferredRenderContext&)`.
+
+Neither interface inherits the other pipeline's provider root. `HDRISkyProvider`
+explicitly implements both sky interfaces. The concrete `EnvironmentProvider`
+adapter implements both environment interfaces and accepts only a sky that
+implements both contracts. Pipeline-specific environment implementations can
+inherit only the interface they actually support; incompatible registration is
+rejected by the feature's template constraints. Virtual inheritance keeps one
+common provider lifecycle for implementations that deliberately support both.
+Sky uses live projection and view rotation; camera translation does not move it.
+
+`IForwardIndirectLightingProvider` prepares graph dependencies and contributes GLSL
+plus its descriptor layout/set at set 3. Its shader exposes
 `ForwardDiffuseIrradiance(position, normal)`,
 `ForwardEnvironmentRadiance(position, direction, roughness)`, and
-`ForwardEnvironmentBRDF(nv, roughness)`. Lit owns albedo, metallic, Fresnel and the
-surface response. Unlit bypasses these contributions.
+`ForwardEnvironmentBRDF(nv, roughness)`. `IDeferredIndirectLightingProvider` is a
+separate contract using `DeferredRenderContext`; the concrete
+`HDRIIndirectLightingProvider` explicitly implements both and shares its internal
+resource preparation. Lit owns albedo, metallic, Fresnel and the surface response.
+Unlit bypasses these contributions.
 
 Specular IBL uses a cached GGX-prefiltered equirectangular mip chain and a 128x128
 BRDF integration LUT. Each prefilter level represents a known roughness; the
@@ -315,12 +371,18 @@ non-unit dimension, and supplied chains may be partial. The single-base-level
 constructor and `GetResolution()/GetData()` remain compatible; pass a level index
 to inspect another mip. `GetMipCount()`, `Validate()` and `ToImageDesc()` support
 the full chain. Memory/generator resources preserve the mip data they provide;
-call `GenerateImageMipmaps` or `ApplyImageMipPolicy` to process these explicitly.
+call `ApplyImageMipPolicy` to request generation explicitly. `GetMipCount()` counts
+CPU-authored levels; `GetRequiredMipCount()` counts the GPU allocation, including
+requested generated levels. `generateMipmaps` records that upload must generate them.
 
-Ordinary mip generation area-filters all source pixels, including odd-sized edges
-and 3D volumes. Float/half images remain linear; explicitly sRGB-tagged image RGB
-is decoded to linear before averaging and re-encoded afterwards. Untagged RGBA8
-is averaged numerically, appropriate for data maps. Ordinary mip levels provide
+Ordinary mip generation runs on the GPU at texture upload. The render command list
+exposes `GenMipMaps(GenMipMapsDesc{.image = image})`, generating all allocated levels
+from level zero across every layer, outside a rendering pass. OpenGL uses
+`glGenerateTextureMipmap`; Vulkan uses successive linear image blits with per-level
+layout transitions, finishing in shader-read layout. Supply a single-sampled,
+linearly filterable color image with a full mip allocation. Standard backend
+filtering applies, including linear-space filtering for sRGB textures.
+Ordinary mip levels provide
 sampling footprints; they are not interchangeable with GGX roughness convolution.
 
 `LighthouseExtendedMipTests` (or `--vulkan`) verifies authored byte/float mip

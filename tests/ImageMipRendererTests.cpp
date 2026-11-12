@@ -21,16 +21,22 @@ ImageMipData Constant(unsigned width,unsigned height,Vec4 value) {
   for(std::size_t i=0;i<mip.data.size();i+=16)std::memcpy(mip.data.data()+i,&value,16);
   return mip;
 }
+ImageData RequestMipmaps(ImageData image) { return ApplyImageMipPolicy(std::move(image), MipPolicy::Generate); }
 std::shared_ptr<SceneTextureGPU> Upload(IRenderDevice& device,const ImageData& data) {
   auto image=std::make_shared<SceneImageGPU>();image->device=&device;
-  image->resolution=data.GetResolution();image->format=data.format;image->mipLevels=data.GetMipCount();
+  image->resolution=data.GetResolution();image->format=data.format;image->mipLevels=data.GetRequiredMipCount();
   image->image=device.CreateImage(data.ToImageDesc());
-  image->view=device.CreateImageView({.image=image->image,.format=data.format,.mipLevelCount=image->mipLevels});
+  if(data.generateMipmaps) {
+    auto commands=device.CreateCommandList(0);commands->Begin();
+    commands->GenMipMaps(GenMipMapsDesc{.image=image->image});commands->End();
+    SubmitAndWait(device,*commands);
+  }
+  image->view=device.CreateImageView({.image=image->image,.format=data.format,.type=data.GetDepth()>1 ? ImageType::Image3D : ImageType::Image2D,.mipLevelCount=image->mipLevels});
   auto texture=std::make_shared<SceneTextureGPU>();texture->device=&device;texture->sourceImage=image;
   texture->image=image->image;texture->view=image->view;
   texture->sampler=device.CreateSampler({.mipmap=SamplerMipmapFilter::Linear});return texture;
 }
-std::vector<std::byte> Sample(IRenderDevice& device,const SceneTextureGPU& texture,float lod,float scale=1) {
+std::vector<std::byte> Sample(IRenderDevice& device,const SceneTextureGPU& texture,float lod,float scale=1,bool volume=false) {
   struct State {
     IRenderDevice& device;ImageHandle image{};ImageViewHandle view{};
     DescriptorSetLayoutHandle setLayout{};DescriptorSetHandle set{};PipelineLayoutHandle layout{};
@@ -60,12 +66,18 @@ std::vector<std::byte> Sample(IRenderDevice& device,const SceneTextureGPU& textu
   state.vertex=device.CreateShaderModule(ShaderCompiler::Compile(R"glsl(#version 450
 void main(){vec2 p[3]=vec2[3](vec2(-1,-1),vec2(3,-1),vec2(-1,3));gl_Position=vec4(p[gl_VertexIndex],0,1);}
 )glsl",{.stage=ShaderStage::Vertex}));
-  state.fragment=device.CreateShaderModule(ShaderCompiler::Compile(R"glsl(#version 450
+  std::string fragmentSource=R"glsl(#version 450
 layout(set=0,binding=0) uniform sampler2D source;
 layout(set=0,binding=1,std140) uniform Settings { vec4 value; } settings;
 layout(location=0) out vec4 color;
 void main(){color=vec4(textureLod(source,gl_FragCoord.xy/vec2(64,32),settings.value.x).rgb*settings.value.y,1);}
-)glsl",{.stage=ShaderStage::Fragment}));
+)glsl";
+  if(volume) {
+    fragmentSource.replace(fragmentSource.find("sampler2D"),9,"sampler3D");
+    const std::string coordinate="gl_FragCoord.xy/vec2(64,32)";
+    fragmentSource.replace(fragmentSource.find(coordinate),coordinate.size(),"vec3(gl_FragCoord.xy/vec2(64,32),0.5)");
+  }
+  state.fragment=device.CreateShaderModule(ShaderCompiler::Compile(fragmentSource,{.stage=ShaderStage::Fragment}));
   state.pipeline=device.CreatePipeline({.vertexShader=state.vertex,.fragmentShader=state.fragment,
     .colorFormats={ImageFormat::RGBA8},.layout=state.layout});
   auto commands=device.CreateCommandList(0);commands->Begin();
@@ -88,13 +100,40 @@ void Run(IRenderDevice& device) {
   ImageData floats(ImageFormat::RGBA32f,{Constant(4,2,{4,0,0,1}),Constant(2,1,{0,0,2,1})});
   auto hdr=Upload(device,floats);auto blue=Sample(device,*hdr,1,0.25f);
   Check(blue[0]==std::byte{0} && std::abs(std::to_integer<int>(blue[2])-128)<=1,"Float HDR mip upload lost values or selected mip zero");
+  // GPU generation must replace authored lower levels, preserve HDR range, and
+  // make every generated level visible to subsequent shader sampling.
+  auto generated=Upload(device,RequestMipmaps(floats));
+  for(float lod : {1.0f,2.0f}) {
+    const auto red=Sample(device,*generated,lod,0.125f);
+    Check(std::abs(std::to_integer<int>(red[0])-128)<=1 && red[2]==std::byte{0},"Generated HDR chain is incorrect");
+  }
+  // Re-recording the same operation tests tracked layouts after earlier sampling.
+  auto regenerate=device.CreateCommandList(0);regenerate->Begin();
+  regenerate->GenMipMaps(GenMipMapsDesc{.image=generated->image});regenerate->End();
+  SubmitAndWait(device,*regenerate);
+  Check(std::abs(std::to_integer<int>(Sample(device,*generated,2,0.125f)[0])-128)<=1,"Repeated mip generation failed");
+  std::vector<std::byte> checkerBytes(8,std::byte{255});
+  checkerBytes[0]=checkerBytes[1]=checkerBytes[2]=std::byte{0};
+  auto srgb=Upload(device,RequestMipmaps(ImageData({2,1},ImageFormat::RGBA8Srgb,checkerBytes)));
+  Check(std::abs(std::to_integer<int>(Sample(device,*srgb,1)[0])-128)<=2,"sRGB mip generation did not filter in linear space");
+  auto odd=Upload(device,RequestMipmaps(ImageData(ImageFormat::RGBA32f,{Constant(7,3,{2,0,0,1})})));
+  Check(std::abs(std::to_integer<int>(Sample(device,*odd,2,0.25f)[0])-128)<=1,"Odd-sized mip chain failed");
+  auto single=Upload(device,RequestMipmaps(ImageData(ImageFormat::RGBA32f,{Constant(1,1,{2,0,0,1})})));
+  Check(std::abs(std::to_integer<int>(Sample(device,*single,0,0.25f)[0])-128)<=1,"Single-level generation failed");
+  ImageMipData volumeMip{2,2,2,std::vector<std::byte>(8*16)};
+  for(unsigned i=0;i<8;++i) {
+    const Vec4 value(i<4?0.0f:4.0f,0,0,1);
+    std::memcpy(volumeMip.data.data()+i*16,&value,16);
+  }
+  auto volume=Upload(device,RequestMipmaps(ImageData(ImageFormat::RGBA32f,{volumeMip})));
+  Check(std::abs(std::to_integer<int>(Sample(device,*volume,1,0.25f,true)[0])-128)<=1,"3D mip generation failed");
   // Strong high-frequency variation must blur as GGX roughness increases.
   auto checker=Constant(64,32,{0,0,0,1});
   for(unsigned y=0;y<32;++y)for(unsigned x=0;x<64;++x){
     const auto value=((x/4+y/4)%2)?1.0f:0.1f;const Vec4 pixel(value,value,value,1);
     std::memcpy(checker.data.data()+(y*64+x)*16,&pixel,16);
   }
-  auto source=Image::FromData(GenerateImageMipmaps(ImageData(ImageFormat::RGBA32f,{checker})));
+  auto source=Image::FromData(RequestMipmaps(ImageData(ImageFormat::RGBA32f,{checker})));
   HDRIEnvironment environment(source);
   auto filtered=environment.GetPrefilteredTexture(device,{64,32},512);
   Check(filtered->sourceImage->mipLevels>=3,"Specular filtering did not create roughness levels");
@@ -104,7 +143,7 @@ void Run(IRenderDevice& device) {
   Check(rough.first>0.35 && rough.first<0.75,"GGX filtering lost environment energy");
   Check(filtered==environment.GetPrefilteredTexture(device,{64,32},512),"Specular convolution was not cached");
   source.MarkDirty();Check(filtered!=environment.GetPrefilteredTexture(device,{64,32},512),"Source change did not invalidate specular mips");
-  auto constantSource=Image::FromData(GenerateImageMipmaps(ImageData(ImageFormat::RGBA32f,{Constant(64,32,{4,1,0.25f,1})})));
+  auto constantSource=Image::FromData(RequestMipmaps(ImageData(ImageFormat::RGBA32f,{Constant(64,32,{4,1,0.25f,1})})));
   HDRIEnvironment constant(constantSource);
   const auto constantTexture=constant.GetPrefilteredTexture(device,{64,32},128);
   for(unsigned mip=0;mip<constantTexture->sourceImage->mipLevels;++mip){
@@ -140,7 +179,7 @@ void RenderRoughness(std::unique_ptr<IRenderDevice> device) {
     std::memcpy(checker.data.data()+(y*128+x)*16,&pixel,16);
   }
   auto environment=std::make_shared<HDRIEnvironment>(Image::FromData(
-    GenerateImageMipmaps(ImageData(ImageFormat::RGBA32f,{std::move(checker)}))));
+    RequestMipmaps(ImageData(ImageFormat::RGBA32f,{std::move(checker)}))));
   const auto image=gpu.CreateImage({.width=256,.height=256,.format=ImageFormat::RGBA8,
     .usage={ImageUsage::ColorAttachment,ImageUsage::TransferDestination,ImageUsage::TransferSource}});
   const auto imageView=gpu.CreateImageView({.image=image,.format=ImageFormat::RGBA8});

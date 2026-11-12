@@ -7,6 +7,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
 #include <unordered_map>
 #include <variant>
@@ -57,7 +58,10 @@ enum class GBufferAttribute
   WorldNormal,
   WorldPosition,
   SurfaceProperties,
-  Emission
+  Emission,
+  Motion,
+  Metallic,
+  Roughness
 };
 struct GBufferAttributeDeclaration
 {
@@ -78,7 +82,10 @@ inline constexpr std::array GBufferAttributes{
                                 "Surface properties",
                                 Lighthouse::ImageFormat::RGBA16f},
     GBufferAttributeDeclaration{GBufferAttribute::Emission, "Emission",
-                                Lighthouse::ImageFormat::RGBA16f}};
+                                Lighthouse::ImageFormat::RGBA16f},
+    GBufferAttributeDeclaration{GBufferAttribute::Motion, "Motion", Lighthouse::ImageFormat::RG16f},
+    GBufferAttributeDeclaration{GBufferAttribute::Metallic, "Metallic", Lighthouse::ImageFormat::R16f},
+    GBufferAttributeDeclaration{GBufferAttribute::Roughness, "Roughness", Lighthouse::ImageFormat::R16f}};
 
 // std430 layout shared with EvaluateLight.glsl. Records follow the frame
 // header.
@@ -138,7 +145,8 @@ struct Material : std::enable_shared_from_this<Material>
   // Ray shader compilation does not require a device with ray-tracing support.
   CompiledMaterialShaders Compile(MaterialRenderPath path,
                                   std::string_view lightingSource = {},
-                                  std::string_view indirectSource = {}) const;
+                                  std::string_view indirectSource = {},
+                                  std::span<const GBufferAttribute> gbufferLayout = {}) const;
 
   SurfaceModel model = SurfaceModel::Unlit;
   std::shared_ptr<const ShadingModel> shadingModel;

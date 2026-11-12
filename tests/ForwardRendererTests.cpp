@@ -1,5 +1,6 @@
 #include <Lighthouse/Extended/Rendering/Renderer.hpp>
 #include <Lighthouse/Extended/Rendering/Bloom.hpp>
+#include <Lighthouse/Extended/Rendering/DeferredRendering.hpp>
 #include <Lighthouse/Extended/Rendering/SceneProvider.hpp>
 #include <Lighthouse/Extended/Rendering/ForwardRendering.hpp>
 #include <Lighthouse/Extended/Resources/Resources.hpp>
@@ -13,7 +14,31 @@
 #include <iostream>
 #include <cstdlib>
 #include <cstring>
+#ifdef LIGHTHOUSE_TEST_DEFERRED
+#include "DeferredBufferProbe.hpp"
+#endif
 using namespace Lighthouse;
+#ifdef LIGHTHOUSE_TEST_DEFERRED
+using RasterFeature=DeferredRenderFeature;
+using RasterSceneProvider=SceneDeferredRenderProvider;
+using RasterLightingProvider=DefaultDeferredLightingProvider;
+using RasterIndirectProvider=IDeferredIndirectLightingProvider;
+using RasterContext=DeferredRenderContext;
+#else
+using RasterFeature=ForwardRenderFeature;
+using RasterSceneProvider=SceneProvider;
+using RasterLightingProvider=DefaultForwardLightingProvider;
+using RasterIndirectProvider=IForwardIndirectLightingProvider;
+using RasterContext=ForwardRenderContext;
+#endif
+Bloom& AddBloom(RasterFeature& feature,BloomSettings settings)
+{
+#ifdef LIGHTHOUSE_TEST_DEFERRED
+  return feature.AddDeferredPostProcess<Bloom>(settings);
+#else
+  return feature.AddForwardPostProcess<Bloom>(settings);
+#endif
+}
 void Check(bool value,const char* message){if(!value)throw std::runtime_error(message);}
 int main(int argc,char** argv)
 {
@@ -41,8 +66,8 @@ int main(int argc,char** argv)
             ImageUsage::ColorAttachment|ImageUsage::TransferDestination|ImageUsage::TransferSource},ImportedRenderGraphImage{imageView,image});
           return RenderOutputTargets{{family.views[0].id,imageResource,0,0,{0,vulkan?0u:128u,128,128},ImageFormat::RGBA8,RenderColorEncoding::SRGB,RenderTargetKind::ImportedImage}};
         }));
-        auto& feature=view.SetRenderFeature<ForwardRenderFeature>();
-        feature.AddProvider<SceneProvider>(store);feature.SetLighting<DefaultForwardLightingProvider>(store);
+        auto& feature=view.SetRenderFeature<RasterFeature>();
+        feature.AddProvider<RasterSceneProvider>(store);feature.SetLighting<RasterLightingProvider>(store);
         const char* hdriPath=std::getenv("LIGHTHOUSE_TEST_HDRI");
         if(hdriPath) {
           auto environment=std::make_shared<HDRIEnvironment>(Resource::LoadImage(hdriPath));
@@ -86,7 +111,7 @@ int main(int argc,char** argv)
             dump.open(path,std::ios::binary);dump<<"P6\n256 256\n255\n";
             for(std::size_t y=0;y<256;++y){const auto row=vulkan?y:255-y;for(std::size_t x=0;x<256;++x)dump.write(reinterpret_cast<const char*>(unlit.data()+(row*256+x)*4),3);}
           }
-          struct ZeroIndirect final : IIndirectLightingProvider { void BuildGraph(ForwardRenderContext&) override {} };
+          struct ZeroIndirect final : RasterIndirectProvider { void BuildGraph(RasterContext&) override {} };
           feature.SetIndirectLightingProvider<ZeroIndirect>();
           renderer->Update(0.016f);Check(renderer->NeedsRebuild(),"Provider replacement did not invalidate the graph");
           composer.Compile();composer.Render();gpu.WaitIdle();const auto noIBL=gpu.ReadImage(image);
@@ -134,7 +159,7 @@ int main(int argc,char** argv)
         for(std::size_t i=0;i<constantBytes.size();i+=16)std::memcpy(constantBytes.data()+i,constant.data(),16);
         auto constantImage=Image::FromData(ImageData({8,4},ImageFormat::RGBA32f,std::move(constantBytes)));
         auto constantEnvironment=std::make_shared<HDRIEnvironment>(constantImage);
-        auto& skyOnly=view.SetRenderFeature<ForwardRenderFeature>();
+        auto& skyOnly=view.SetRenderFeature<RasterFeature>();
         skyOnly.SetEnvironmentProvider<EnvironmentProvider>(std::make_shared<HDRISkyProvider>(constantEnvironment));
         renderer->Update(0.016f);composer.Compile();composer.Render();gpu.WaitIdle();
         const auto hdrPixels=gpu.ReadImage(image);
@@ -148,14 +173,14 @@ int main(int argc,char** argv)
         composer.Compile();composer.Render();gpu.WaitIdle();
         Check(hdrPixels==gpu.ReadImage(image),"Re-upload changed constant HDR pixels");
         // Bloom is entirely GPU-rendered and remains in HDR until resolve.
-        auto& bloom = skyOnly.AddForwardPostProcess<Bloom>(BloomSettings{.Intensity=0.5f,.MipCount=5});
+        auto& bloom = AddBloom(skyOnly,BloomSettings{.Intensity=0.5f,.MipCount=5});
         Check(renderer->NeedsRebuild(), "Adding bloom did not invalidate the graph");
         composer.Compile();
         const auto bloomGraph=composer.GetRenderGraph().GetInspectionData(true);
         std::size_t compositeIndex=0,resolveIndex=0;
         for(std::size_t i=0;i<bloomGraph.passes.size();++i) {
           if(bloomGraph.passes[i].name=="Bloom composite")compositeIndex=i;
-          if(bloomGraph.passes[i].name=="Resolve forward view")resolveIndex=i;
+          if(bloomGraph.passes[i].name=="Resolve scene view")resolveIndex=i;
         }
         Check(compositeIndex<resolveIndex,"Bloom must precede tone mapping");
         composer.Render();gpu.WaitIdle();
@@ -188,11 +213,11 @@ int main(int argc,char** argv)
         const auto glowHandle=MaterialResource::FromData(glowMaterial);
         for(auto entity:scene.Registry().view<MeshRender>())scene.Registry().get<MeshRender>(entity).material=glowHandle;
         key.Get<Light>().enabled=false;fill.Get<Light>().enabled=false;
-        auto& glowFeature=view.SetRenderFeature<ForwardRenderFeature>();
-        glowFeature.AddProvider<SceneProvider>(store);glowFeature.SetLighting<DefaultForwardLightingProvider>(store);
+        auto& glowFeature=view.SetRenderFeature<RasterFeature>();
+        glowFeature.AddProvider<RasterSceneProvider>(store);glowFeature.SetLighting<RasterLightingProvider>(store);
         camera.resolution={128,128};view.SetViewFamily({{camera}});renderer->Update(0.016f);
         composer.Compile();composer.Render();gpu.WaitIdle();const auto withoutGlow=gpu.ReadImage(image);
-        glowFeature.AddForwardPostProcess<Bloom>(BloomSettings{.Intensity=0.5f,.MipCount=5});
+        AddBloom(glowFeature,BloomSettings{.Intensity=0.5f,.MipCount=5});
         composer.Compile();composer.Render();gpu.WaitIdle();const auto withGlow=gpu.ReadImage(image);
         std::size_t haloPixels=0;
         for(std::size_t y=0;y<256;++y)for(std::size_t x=0;x<256;++x) {
@@ -205,7 +230,38 @@ int main(int argc,char** argv)
               Check(withoutGlow[offset+channel]==withGlow[offset+channel],"Bloom overwrote a neighboring region");
         }
         Check(haloPixels>20,"GPU bloom did not spread highlights beyond emissive geometry");
+#ifdef LIGHTHOUSE_TEST_DEFERRED
+        const auto hasMotion=[&] {
+          for(const auto& resource:composer.GetRenderGraph().GetInspectionData(true).resources)
+            if(resource.name=="Deferred Motion")return true;
+          return false;
+        };
+        Check(!hasMotion(),"Unrequested motion attachment was allocated");
+        const auto probeImage=gpu.CreateImage({.width=128,.height=128,.format=ImageFormat::RGBA8,.usage={ImageUsage::ColorAttachment,ImageUsage::TransferSource}});
+        const auto probeView=gpu.CreateImageView({.image=probeImage,.format=ImageFormat::RGBA8});
+        auto& probe=glowFeature.AddDeferredPostProcess<DeferredBufferProbe>(gpu,probeImage,probeView);
+        renderer->Update(0.016f);Check(renderer->NeedsRebuild(),"New deferred requirements did not invalidate the graph");
+        composer.Compile();Check(hasMotion(),"Requested motion attachment was not allocated");
+        composer.Render();gpu.WaitIdle();
+        const auto stationary=gpu.ReadImage(probeImage);
+        auto channelMax=[](const std::vector<std::byte>& bytes,std::size_t channel){int maximum=0;for(std::size_t i=channel;i<bytes.size();i+=4)maximum=std::max(maximum,std::to_integer<int>(bytes[i]));return maximum;};
+        Check(channelMax(stationary,0)==0,"Stationary geometry has nonzero motion");
+        Check(channelMax(stationary,1)>200 && channelMax(stationary,2)>200,"Requested metallic/roughness data was not produced");
+        camera.cameraPosition.x+=0.15f;camera.view=glm::lookAtRH(camera.cameraPosition,Vec3(0,-0.15f,0),Vec3(0,1,0));
+        view.SetViewFamily({{camera}});renderer->Update(0.016f);Check(!renderer->NeedsRebuild(),"Camera motion unnecessarily rebuilt deferred rendering");
+        composer.Render();gpu.WaitIdle();Check(channelMax(gpu.ReadImage(probeImage),0)>10,"Motion vectors ignored previous camera matrices");
+        composer.Render();gpu.WaitIdle();Check(channelMax(gpu.ReadImage(probeImage),0)==0,"Motion history did not advance after submission");
+        for(auto entity:scene.Registry().view<MeshRender,Transform>()) {auto& transform=scene.Registry().get<Transform>(entity);transform.SetPos(transform.GetPos()+Vec3(0.1f,0,0));}
+        renderer->Update(0.016f);Check(!renderer->NeedsRebuild(),"Object motion unnecessarily rebuilt deferred rendering");
+        composer.Render();gpu.WaitIdle();Check(channelMax(gpu.ReadImage(probeImage),0)>10,"Motion vectors ignored previous object transforms");
+        probe.requested=false;renderer->Update(0.016f);Check(renderer->NeedsRebuild(),"Changed deferred dependencies did not invalidate cached graph");
+        composer.Compile();Check(!hasMotion(),"Removed motion requirement left an unused attachment");
+        composer.Render();gpu.WaitIdle();
+#endif
         composer.GetRenderGraph().Clear();composer.RemoveTechnique(ref.handle);
+#ifdef LIGHTHOUSE_TEST_DEFERRED
+        gpu.DestroyImageView(probeView);gpu.DestroyImage(probeImage);
+#endif
       }
       gpu.DestroyImageView(imageView);gpu.DestroyImage(image);
       std::cout<<backend->Name()<<": shared materials (forward/deferred/ray), custom Lit/Unlit pixels, lighting, split regions, cache and GPU mip-chain bloom passed\n";

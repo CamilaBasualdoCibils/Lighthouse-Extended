@@ -103,6 +103,9 @@ struct RayRecorder : IRaySceneProvider
 };
 static_assert(!std::derived_from<SceneForwardRenderProvider, IDeferredGeometryProvider>);
 static_assert(!std::derived_from<SceneRaytracedRenderProvider, IForwardGeometryProvider>);
+static_assert(std::derived_from<IRaySceneProvider,IPathTracingProvider>);
+static_assert(!std::derived_from<IRaySceneProvider,IForwardProvider>);
+static_assert(!std::derived_from<IRaySceneProvider,IDeferredProvider>);
 }
 
 TEST(RenderFeatures, MultipleProvidersAndIndependentFeatures)
@@ -220,7 +223,7 @@ TEST(RenderFeatures, CameraPoseChangesDoNotRebuildButResolutionDoes)
   EXPECT_TRUE(renderer->NeedsRebuild());
 }
 
-TEST(RenderFeatures, RejectsMissingPostProcessInputs)
+TEST(RenderFeatures, ProvisionsRequestedPostProcessAttachments)
 {
   TestComposer composer;
   auto surface = composer.CreateView<Surface>();
@@ -229,7 +232,7 @@ TEST(RenderFeatures, RejectsMissingPostProcessInputs)
   auto& view = renderer->CreateView(Output(surface));
   view.SetViewFamily(Mono());
   view.SetRenderFeature<DeferredRenderFeature>().AddDeferredPostProcess<NeedsNormal>();
-  EXPECT_THROW(composer.Compile(), std::logic_error);
+  EXPECT_NO_THROW(composer.Compile());
 }
 
 TEST(RenderFeatures, ForwardPlusRunsAssignmentAndGeometry)

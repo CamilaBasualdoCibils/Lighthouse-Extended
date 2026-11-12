@@ -1,5 +1,6 @@
 #pragma once
-#include <Lighthouse/Extended/Rendering/RenderFeatures.hpp>
+#include <Lighthouse/Extended/Rendering/ForwardRenderFeature.hpp>
+#include <Lighthouse/Extended/Rendering/DeferredRenderFeature.hpp>
 namespace Lighthouse
 {
 struct BloomSettings

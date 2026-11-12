@@ -28,26 +28,21 @@ TEST(ImageMips, PoliciesDistinguishAuthoredAndGeneratedMips) {
   const auto automatic=ApplyImageMipPolicy(Authored(),MipPolicy::Auto);
   EXPECT_EQ(automatic.GetMipCount(),2);EXPECT_EQ(automatic.GetData(1)[0],std::byte{180});
   const auto generated=ApplyImageMipPolicy(Authored(),MipPolicy::Generate);
-  EXPECT_EQ(generated.GetMipCount(),3);EXPECT_EQ(generated.GetData(1)[0],std::byte{20});
+  EXPECT_EQ(generated.GetMipCount(),1);EXPECT_EQ(generated.GetRequiredMipCount(),3);EXPECT_TRUE(generated.generateMipmaps);
   auto base=ApplyImageMipPolicy(Authored(),MipPolicy::None);
-  EXPECT_EQ(ApplyImageMipPolicy(base,MipPolicy::Auto).GetMipCount(),3);
+  EXPECT_EQ(ApplyImageMipPolicy(base,MipPolicy::Auto).GetRequiredMipCount(),3);
   EXPECT_EQ(ApplyImageMipPolicy(base,MipPolicy::Load).GetMipCount(),1);
 }
-TEST(ImageMips, OddDimensionsAndVolumesIncludeAllSourcePixels) {
-  auto image=GenerateImageMipmaps(ImageData({3,1},ImageFormat::R8,{std::byte{0},std::byte{0},std::byte{255}}));
-  ASSERT_EQ(image.GetMipCount(),2);EXPECT_EQ(image.GetResolution(1),UVec2(1,1));EXPECT_EQ(image.GetData(1)[0],std::byte{85});
-  auto volume=GenerateImageMipmaps(ImageData(ImageFormat::R8,{{2,2,2,{std::byte{0},std::byte{0},std::byte{0},std::byte{0},
-    std::byte{200},std::byte{200},std::byte{200},std::byte{200}}}}));
-  EXPECT_EQ(volume.GetDepth(1),1);EXPECT_EQ(volume.GetData(1)[0],std::byte{100});
-}
-TEST(ImageMips, FloatHDRAndSRGBUseTheCorrectFilteringSpace) {
-  std::vector<std::byte> bytes(8);const float source[]{2,6};std::memcpy(bytes.data(),source,sizeof(source));
-  auto image=GenerateImageMipmaps(ImageData({2,1},ImageFormat::R32f,bytes));float result;
-  std::memcpy(&result,image.GetData(1).data(),4);EXPECT_FLOAT_EQ(result,4);
-  const std::vector<std::byte> checker{std::byte{0},std::byte{0},std::byte{0},std::byte{255},
-    std::byte{255},std::byte{255},std::byte{255},std::byte{255}};
-  auto srgb=GenerateImageMipmaps(ImageData({2,1},ImageFormat::RGBA8Srgb,checker));
-  EXPECT_NEAR(std::to_integer<int>(srgb.GetData(1)[0]),188,1);EXPECT_EQ(srgb.GetData(1)[3],std::byte{255});
+TEST(ImageMips, GenerationAllocatesTheFullChainWithoutCPUFiltering) {
+  auto image=ApplyImageMipPolicy(ImageData({3,1},ImageFormat::R8,{std::byte{0},std::byte{0},std::byte{255}}),MipPolicy::Generate);
+  EXPECT_TRUE(image.generateMipmaps);EXPECT_EQ(image.GetMipCount(),1);
+  EXPECT_EQ(image.GetRequiredMipCount(),2);
+  auto desc=image.ToImageDesc();EXPECT_EQ(desc.mipLevels,2);EXPECT_EQ(desc.initialMips.size(),1);
+  EXPECT_EQ(desc.initialMips[0][2],std::byte{255});
+  auto volume=ApplyImageMipPolicy(ImageData(ImageFormat::R8,{{8,2,4,std::vector<std::byte>(64)}}),MipPolicy::Generate);
+  EXPECT_EQ(volume.GetRequiredMipCount(),4);EXPECT_EQ(volume.ToImageDesc().type,ImageType::Image3D);
+  EXPECT_FALSE(ApplyImageMipPolicy(image,MipPolicy::Load).generateMipmaps);
+  EXPECT_FALSE(ApplyImageMipPolicy(image,MipPolicy::None).generateMipmaps);
 }
 TEST(ImageMips, FileOptionsLoadExistingMipsAndGenerateFromPNG) {
   const auto fixture=std::filesystem::path(LIGHTHOUSE_TEST_SOURCE_DIR)/"tests/Fixtures/Mips.ktx";
@@ -56,9 +51,9 @@ TEST(ImageMips, FileOptionsLoadExistingMipsAndGenerateFromPNG) {
   EXPECT_EQ(Resource::LoadImage(fixture).Resolve().GetMipCount(),2);
   EXPECT_EQ(Resource::LoadImage(fixture,{.mipPolicy=MipPolicy::None}).Resolve().GetMipCount(),1);
   auto regenerated=Resource::LoadImage(fixture,{.mipPolicy=MipPolicy::Generate}).Resolve();
-  EXPECT_EQ(regenerated.GetMipCount(),3);EXPECT_EQ(regenerated.GetData(1)[0],std::byte{20});
+  EXPECT_EQ(regenerated.GetMipCount(),1);EXPECT_EQ(regenerated.GetRequiredMipCount(),3);EXPECT_TRUE(regenerated.generateMipmaps);
   const auto png=fixture.parent_path()/"Decoder.png";
   EXPECT_EQ(Resource::LoadImage(png,{.mipPolicy=MipPolicy::Load}).Resolve().GetMipCount(),1);
-  EXPECT_EQ(Resource::LoadImage(png,{.mipPolicy=MipPolicy::Generate}).Resolve().GetMipCount(),2);
-  EXPECT_EQ(Resource::LoadImage(png).Resolve().GetMipCount(),2);
+  EXPECT_EQ(Resource::LoadImage(png,{.mipPolicy=MipPolicy::Generate}).Resolve().GetRequiredMipCount(),2);
+  EXPECT_EQ(Resource::LoadImage(png).Resolve().GetRequiredMipCount(),2);
 }

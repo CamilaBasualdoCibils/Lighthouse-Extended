@@ -17,8 +17,7 @@ namespace Lighthouse
 {
 enum class MipPolicy { None, Load, Generate, Auto };
 
-// Area-filter the base level into a full ordinary mip chain.
-ImageData GenerateImageMipmaps(const ImageData&);
+// Select authored levels or request GPU generation when uploaded.
 ImageData ApplyImageMipPolicy(ImageData, MipPolicy);
 
 // Creating a resource never opens a file.

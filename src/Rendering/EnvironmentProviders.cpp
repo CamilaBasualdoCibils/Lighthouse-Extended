@@ -1,3 +1,4 @@
+#include "ImageUpload.hpp"
 #include <Lighthouse/Extended/Rendering/EnvironmentProviders.hpp>
 #include <Lighthouse/Extended/Rendering/ForwardRendering.hpp>
 #include <Lighthouse/Extended/EmbeddedResources.hpp>
@@ -186,10 +187,11 @@ std::shared_ptr<SceneTextureGPU> HDRIEnvironment::GetTexture(IRenderDevice& devi
   if (cached.texture && cached.revision == GetRevision()) return cached.texture;
   auto pixels = Resolve();
   auto image = std::make_shared<SceneImageGPU>(); image->device = &device; image->resolution = pixels->GetResolution();
-  image->format=pixels->format;image->mipLevels=pixels->GetMipCount();
+  image->format=pixels->format;image->mipLevels=pixels->GetRequiredMipCount();
   auto description=pixels->ToImageDesc();
   image->image = device.CreateImage(description);
-  image->view = device.CreateImageView({.image = image->image, .format = pixels->GetFormat(),.mipLevelCount=pixels->GetMipCount()});
+  Detail::GenerateUploadedMipmaps(device, image->image, *pixels);
+  image->view = device.CreateImageView({.image = image->image, .format = pixels->GetFormat(),.mipLevelCount=pixels->GetRequiredMipCount()});
   auto texture = std::make_shared<SceneTextureGPU>(); texture->device = &device;
   texture->sourceImage = image; texture->image = image->image; texture->view = image->view;
   texture->sampler = device.CreateSampler({.mipmap = image->mipLevels>1 ? SamplerMipmapFilter::Linear : SamplerMipmapFilter::None,
@@ -247,7 +249,15 @@ HDRISkyProvider::HDRISkyProvider(std::shared_ptr<HDRIEnvironment> environment) :
 { if (!m_environment) throw std::invalid_argument("Sky requires an HDRI environment"); }
 HDRISkyProvider::~HDRISkyProvider() = default;
 std::uint64_t HDRISkyProvider::GetConfigurationRevision() const noexcept { return m_environment->GetRevision(); }
-void HDRISkyProvider::BuildGraph(RenderFeatureContext& ctx, RenderFeatureResult& output)
+void HDRISkyProvider::BuildGraphForward(ForwardRenderContext& context)
+{
+  BuildSky(context.frame,context.output);
+}
+void HDRISkyProvider::BuildGraphDeferred(DeferredRenderContext& context)
+{
+  BuildSky(context.frame,context.output);
+}
+void HDRISkyProvider::BuildSky(RenderFeatureContext& ctx, RenderFeatureResult& output)
 {
   auto& device = ctx.technique.device;
   auto texture = m_environment->GetTexture(device);
@@ -353,5 +363,23 @@ void HDRIIndirectLightingProvider::BuildGraph(ForwardRenderContext& ctx)
   ctx.indirectLayout=state->setLayout; ctx.indirectSet=state->set;
   ctx.indirectShader=ExtendedEmbedded::ReadText("environment/Indirect.glsl");
   ctx.frame.keepAlive.push_back(state);
+}
+void HDRIIndirectLightingProvider::BuildGraph(DeferredRenderContext& context)
+{
+  // The environment prefilter/bindings are shared; compatibility remains an
+  // explicit implementation of each feature's provider interface.
+  ForwardRenderContext resources{context.frame};
+  BuildGraph(resources);
+  context.lights.insert(context.lights.end(), resources.lights.begin(), resources.lights.end());
+  context.indirectShader = std::move(resources.indirectShader);
+  for(std::size_t at=0;(at=context.indirectShader.find("set=3",at))!=std::string::npos;at+=5)
+    context.indirectShader.replace(at,5,"set=2");
+  context.indirectLayout = resources.indirectLayout;
+  context.indirectSet = resources.indirectSet;
+}
+DeferredDependencies HDRIIndirectLightingProvider::GetDeferredDependencies() const
+{
+  return {{DeferredSemantics::Normal, DeferredSemantics::WorldPosition,
+           DeferredSemantics::SurfaceProperties}, {}};
 }
 } // namespace Lighthouse

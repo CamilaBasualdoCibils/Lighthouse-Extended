@@ -1,3 +1,4 @@
+#include "SceneColorResolver.hpp"
 #include <Lighthouse/Engine/Assets/Mesh.hpp>
 #include <Lighthouse/Engine/Assets/ShaderCompiler.hpp>
 #include <Lighthouse/Extended/EmbeddedResources.hpp>
@@ -24,11 +25,7 @@ struct ForwardRenderServices::Impl
   std::string lighting, indirect;
   DescriptorSetLayoutHandle indirectLayout{};
   DescriptorSetHandle indirectSet{};
-  DescriptorSetLayoutHandle lightsLayout{}, resolveSetLayout{};
-  PipelineLayoutHandle resolveLayout{};
-  ShaderModuleHandle resolveVertex{}, resolveFragment{};
-  GraphicsPipelineHandle resolvePipeline{};
-  SamplerHandle sampler{};
+  DescriptorSetLayoutHandle lightsLayout{};
   struct Pipeline
   {
     IRenderDevice* device{};
@@ -58,20 +55,9 @@ struct ForwardRenderServices::Impl
   }
   ~Impl()
   {
-    if (resolvePipeline)
-      device.DestroyPipeline(resolvePipeline);
-    for (auto shader : {resolveVertex, resolveFragment})
-      if (shader)
-        device.DestroyModule(shader);
-    if (resolveLayout)
-      device.DestroyPipelineLayout(resolveLayout);
     pipelines.clear();
     instances.clear();
-    for (auto set : {lightsLayout, resolveSetLayout})
-      if (set)
-        device.DestroyDescriptorSetLayout(set);
-    if (sampler)
-      device.DestroySampler(sampler);
+    if(lightsLayout)device.DestroyDescriptorSetLayout(lightsLayout);
   }
   void Initialize()
   {
@@ -81,31 +67,6 @@ struct ForwardRenderServices::Impl
                          .type = DescriptorType::StorageBuffer,
                          .count = 1,
                          .stages = ShaderStageFlags::Fragment}}});
-  }
-  void InitializeResolve()
-  {
-    if (resolvePipeline)
-      return;
-    resolveSetLayout = device.CreateDescriptorSetLayout(
-        {.bindings = {{.binding = 0,
-                       .type = DescriptorType::CombinedImageSampler,
-                       .count = 1,
-                       .stages = ShaderStageFlags::Fragment}}});
-    resolveLayout = device.CreatePipelineLayout({.sets = {resolveSetLayout}});
-    resolveVertex = device.CreateShaderModule(ShaderCompiler::Compile(
-        ExtendedEmbedded::ReadText("forward/Resolve.vert.glsl"),
-        {.stage = ShaderStage::Vertex}));
-    resolveFragment = device.CreateShaderModule(ShaderCompiler::Compile(
-        ExtendedEmbedded::ReadText("forward/Resolve.frag.glsl"),
-        {.stage = ShaderStage::Fragment}));
-    resolvePipeline =
-        device.CreatePipeline({.vertexShader = resolveVertex,
-                               .fragmentShader = resolveFragment,
-                               .colorFormats = {ImageFormat::RGBA8},
-                               .layout = resolveLayout});
-    sampler =
-        device.CreateSampler({.addressU = SamplerAddressMode::ClampToEdge,
-                              .addressV = SamplerAddressMode::ClampToEdge});
   }
   std::shared_ptr<const MaterialInstance>
   Instance(std::shared_ptr<SceneMaterialGPU> source)
@@ -272,111 +233,9 @@ void ForwardRenderServices::BeginGeometry(ForwardRenderContext& ctx)
   ctx.output.color = std::move(colors);
   ctx.output.auxiliary[ForwardSemantics::Depth] = std::move(depths);
 }
-void ForwardRenderServices::Resolve(RenderFeatureContext& frame,
-                                    RenderFeatureResult& output)
+void ForwardRenderServices::Resolve(RenderFeatureContext& frame, RenderFeatureResult& output)
 {
-  m_impl->InitializeResolve();
-  auto& device = m_impl->device;
-  struct SetOwner
-  {
-    IRenderDevice* device;
-    DescriptorSetHandle set;
-    SetOwner(IRenderDevice* d, DescriptorSetHandle s) : device(d), set(s) {}
-    ~SetOwner()
-    {
-      device->DestroyDescriptorSet(set);
-    }
-  };
-  for (std::size_t i = 0; i < output.color.size(); ++i)
-  {
-    const auto source = output.color[i];
-    const auto target = frame.destinations[i];
-    if (target.encoding != RenderColorEncoding::SRGB)
-      throw std::runtime_error(
-          "Default forward resolver currently requires SDR sRGB output");
-    auto set = std::make_shared<SetOwner>(
-        &device,
-        device.CreateDescriptorSet({.layout = m_impl->resolveSetLayout}));
-    struct Data
-    {
-      RenderGraphResource input, encoded, destination;
-    };
-    const auto& pass = frame.technique.graph.AddPass<Data>(
-        "Resolve forward view",
-        [source, target](RenderGraph::Builder& builder, Data& data)
-        {
-          data.input = builder.Read(source.image);
-          data.encoded = builder.Create<RenderGraphImage>(
-              "Forward SDR color", {.width = source.viewport.width,
-                                    .height = source.viewport.height,
-                                    .format = ImageFormat::RGBA8,
-                                    .usage = {ImageUsage::ColorAttachment,
-                                              ImageUsage::TransferSource}});
-          data.encoded = builder.Write(data.encoded);
-          data.destination = builder.Write(builder.Read(target.image));
-        },
-        [this, set, source, target](const Data& data,
-                                    FrameGraphPassResources& resources,
-                                    RenderGraphExecutePassContext& execute)
-        {
-          auto& device = m_impl->device;
-          const auto& input = resources.get<RenderGraphImage>(data.input);
-          const auto& encoded = resources.get<RenderGraphImage>(data.encoded);
-          const std::array writes{DescriptorWrite{
-              .binding = 0,
-              .resource =
-                  DescriptorImageInfo{input.viewHandle, m_impl->sampler}}};
-          device.UpdateDescriptorSet(set->set, writes);
-          auto& commands = *execute.commandList;
-          commands.MemoryBarrier(
-              {.srcStageMask = PipelineStage::ColorAttachmentOutput,
-               .srcAccessMask = PipelineAccess::ColorAttachmentWrite,
-               .dstStageMask = PipelineStage::FragmentShader,
-               .dstAccessMask = PipelineAccess::ShaderSampledRead});
-          commands.BeginRendering({.colorAttachment = encoded.viewHandle,
-                                   .width = source.viewport.width,
-                                   .height = source.viewport.height});
-          commands.BindPipeline(m_impl->resolvePipeline);
-          commands.BindDescriptorSet(0, set->set);
-          commands.Draw(PrimitiveTopology::TriangleList, 3, 0);
-          commands.EndRendering();
-          ImageHandle destination;
-          switch (target.kind)
-          {
-          case RenderTargetKind::Window:
-            destination = resources.get<ImportedWindowView>(data.destination)
-                              .currentImage;
-            break;
-          case RenderTargetKind::ImportedImage:
-            destination =
-                resources.get<ImportedRenderGraphImage>(data.destination)
-                    .handle;
-            break;
-          case RenderTargetKind::Image:
-            destination =
-                resources.get<RenderGraphImage>(data.destination).handle;
-            break;
-          }
-          const auto& v = target.viewport;
-          commands.MemoryBarrier(
-              {.srcStageMask = PipelineStage::ColorAttachmentOutput,
-               .srcAccessMask = PipelineAccess::ColorAttachmentWrite,
-               .dstStageMask = PipelineStage::Transfer,
-               .dstAccessMask = PipelineAccess::TransferRead});
-          commands.BlitImage(
-              encoded.handle, destination,
-              {.srcSubresource = {ImageAspect::Color, 0, 0, 1},
-               .srcOffsets = {{{0, 0, 0},
-                               {source.viewport.width, source.viewport.height,
-                                1}}},
-               .dstSubresource = {ImageAspect::Color, target.mipLevel,
-                                  target.arrayLayer, 1},
-               .dstOffsets = {{{v.x, v.y, 0},
-                               {v.x + v.width, v.y + v.height, 1}}}},
-              ImageFilter::Linear);
-        });
-    output.color[i] = target;
-    output.color[i].image = pass.destination;
-  }
+  ResolveSceneColor(frame, output);
 }
+
 } // namespace Lighthouse

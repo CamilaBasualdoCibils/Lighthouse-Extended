@@ -1,3 +1,4 @@
+#include "ImageUpload.hpp"
 #include <Lighthouse/Extended/Rendering/SceneRenderStore.hpp>
 #include <Lighthouse/Extended/Rendering/ForwardRendering.hpp>
 #include <Lighthouse/Extended/World/Entity/Transform.hpp>
@@ -151,9 +152,10 @@ struct SceneRenderStore::GPUCache
   std::shared_ptr<SceneImageGPU> UploadImage(IRenderDevice& device, const ImageData& pixels)
   {
     auto result = std::make_shared<SceneImageGPU>(); result->device = &device; result->resolution = pixels.GetResolution();
-    result->format=pixels.GetFormat(); result->mipLevels=pixels.GetMipCount();
+    result->format=pixels.GetFormat(); result->mipLevels=pixels.GetRequiredMipCount();
     result->image = device.CreateImage(pixels.ToImageDesc());
-    result->view = device.CreateImageView({.image=result->image, .format=pixels.GetFormat(), .mipLevelCount=pixels.GetMipCount()});
+    Detail::GenerateUploadedMipmaps(device, result->image, pixels);
+    result->view = device.CreateImageView({.image=result->image, .format=pixels.GetFormat(), .mipLevelCount=pixels.GetRequiredMipCount()});
     return result;
   }
   std::shared_ptr<SceneTextureGPU> Default(IRenderDevice& device, std::array<unsigned char,4> pixel)

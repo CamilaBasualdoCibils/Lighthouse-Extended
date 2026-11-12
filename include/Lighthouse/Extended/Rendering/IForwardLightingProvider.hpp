@@ -1,2 +1,2 @@
 #pragma once
-#include <Lighthouse/Extended/Rendering/RenderFeatures.hpp>
+#include <Lighthouse/Extended/Rendering/ForwardRenderFeature.hpp>

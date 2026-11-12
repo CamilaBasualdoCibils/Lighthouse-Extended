@@ -5,6 +5,7 @@
 #include <Lighthouse/Backends/Input/GLFW/GLFWInputBackend.hpp>
 #include <Lighthouse/Engine/Engine.hpp>
 #include <Lighthouse/Extended/Rendering/ForwardRendering.hpp>
+#include <Lighthouse/Extended/Rendering/DeferredRendering.hpp>
 #include <Lighthouse/Extended/Rendering/Bloom.hpp>
 #include <Lighthouse/Extended/Rendering/Renderer.hpp>
 #include <Lighthouse/Extended/Rendering/SceneProvider.hpp>
@@ -96,16 +97,21 @@ public:
 class RenderFeatureSettingsTool final : public ISimpleTool
 {
 public:
-  RenderFeatureSettingsTool(EngineRuntime&, Bloom& bloom) : m_bloom(bloom) {}
+  RenderFeatureSettingsTool(EngineRuntime&,Bloom& forward,Bloom& deferred):m_forward(forward),m_deferred(deferred){}
   std::string_view Name() const noexcept override { return "Render Feature Settings"; }
   void Draw() override
   {
-    if (!ImGui::BeginTabBar("RenderFeatureTabs"))
-      return;
-    if (ImGui::BeginTabItem("Forward"))
-    {
+    if(!ImGui::BeginTabBar("RenderFeatureTabs"))return;
+    if(ImGui::BeginTabItem("Forward")){DrawBloom(m_forward);ImGui::EndTabItem();}
+    if(ImGui::BeginTabItem("Deferred")){DrawBloom(m_deferred);ImGui::EndTabItem();}
+    if(ImGui::BeginTabItem("PathTrace"))ImGui::EndTabItem();
+    ImGui::EndTabBar();
+  }
+private:
+  static void DrawBloom(Bloom& bloom)
+  {
       ImGui::SeparatorText("Mip-chain bloom");
-      auto settings = m_bloom.GetSettings();
+      auto settings = bloom.GetSettings();
       bool changed = ImGui::Checkbox("Enabled", &settings.Enabled);
       ImGui::BeginDisabled(!settings.Enabled);
       int levels = static_cast<int>(settings.MipCount);
@@ -123,17 +129,10 @@ public:
       changed |= ImGui::DragFloat("Intensity", &settings.Intensity, 0.01f, 0.0f, 5.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
       ImGui::EndDisabled();
       if (changed)
-        m_bloom.SetSettings(settings);
-      ImGui::EndTabItem();
-    }
-    if (ImGui::BeginTabItem("Deferred"))
-      ImGui::EndTabItem();
-    if (ImGui::BeginTabItem("PathTrace"))
-      ImGui::EndTabItem();
-    ImGui::EndTabBar();
+        bloom.SetSettings(settings);
   }
-private:
-  Bloom& m_bloom;
+  Bloom& m_forward;
+  Bloom& m_deferred;
 };
 
 class RenderFeaturesExample final : public IApplication
@@ -160,7 +159,7 @@ public:
 
     const auto technique = composer.AddTechnique<Renderer>(&composer);
     m_renderer = composer.GetTechnique<Renderer>(technique);
-    const auto resource = Resource::LoadScene("ABeautifulGame.glb");
+    const auto resource = Resource::LoadScene("DamagedHelmet.gltf");
     m_scene = std::make_unique<Scene>(resource.GetDefaultScene());
     m_store = std::make_shared<SceneRenderStore>(*m_scene);
     const auto addLight =
@@ -185,23 +184,34 @@ public:
     const auto imgui = composer.CreateView<Lighthouse::ImGuiView>(
         ImGuiViewDesc{.showImguiDemo = true, .showImplotDemo = true});
     composer.GetView<Lighthouse::ImGuiView>(imgui)->AddObject(GetToolBox());
+    std::array<Bloom*,2> bloomSettings{};
     for (std::size_t i = 0; i < m_views.size(); ++i)
     {
       auto& view = m_renderer->CreateView(
           std::make_shared<WindowRenderOutput>(m_window));
       m_views[i] = &view;
+
       if (i == 0)
       {
         auto& forward = view.SetRenderFeature<ForwardRenderFeature>();
         forward.AddProvider<SceneProvider>(m_store);
         auto& bloom = forward.AddForwardPostProcess<Bloom>(
             BloomSettings{.Threshold=1.0f,.SoftKnee=0.5f,.Intensity=0.35f,.MipCount=6});
-        GetToolBox().AddTool<RenderFeatureSettingsTool>(bloom);
+        bloomSettings[0]=&bloom;
         forward.SetLighting<DefaultForwardLightingProvider>(m_store);
         forward.SetEnvironmentProvider<EnvironmentProvider>(
             std::make_shared<HDRISkyProvider>(environment));
         forward.SetIndirectLightingProvider<HDRIIndirectLightingProvider>(
             environment, ibl);
+      }
+      else if(i==1)
+      {
+        auto& deferred=view.SetRenderFeature<DeferredRenderFeature>();
+        deferred.AddProvider<SceneDeferredRenderProvider>(m_store);
+        deferred.SetLighting<DefaultDeferredLightingProvider>(m_store);
+        deferred.SetEnvironmentProvider<EnvironmentProvider>(std::make_shared<HDRISkyProvider>(environment));
+        deferred.SetIndirectLightingProvider<HDRIIndirectLightingProvider>(environment,ibl);
+        bloomSettings[1]=&deferred.AddDeferredPostProcess<Bloom>(BloomSettings{.Threshold=1.0f,.SoftKnee=0.5f,.Intensity=0.35f,.MipCount=6});
       }
       else
       {
@@ -209,6 +219,7 @@ public:
       }
     }
 
+    GetToolBox().AddTool<RenderFeatureSettingsTool>(*bloomSettings[0],*bloomSettings[1]);
     UpdateLayout();
     SetupInput();
     m_renderer->Update(0.0f);
@@ -280,13 +291,14 @@ private:
         });
     m_windowControls->SetEnabled(true);
     GetWindowManager().SetCursorMode(window, CursorMode::Captured);
-    m_views[0]->SetViewSource(
-        [this]
+    for(std::size_t i=0;i<2;++i)
+    m_views[i]->SetViewSource(
+        [this,i]
         {
           RenderViewData camera;
-          camera.id = 1;
+          camera.id = i+1;
           camera.resolution =
-              m_views[0]->GetViewFamily().views.front().resolution;
+              m_views[i]->GetViewFamily().views.front().resolution;
           camera.cameraPosition = m_cameraPosition;
           camera.view =
               glm::lookAtRH(m_cameraPosition,
@@ -386,6 +398,7 @@ private:
   bool m_cursorCaptured{true}, m_skipMouseDelta{true};
 };
 } // namespace
+
 
 int main()
 {

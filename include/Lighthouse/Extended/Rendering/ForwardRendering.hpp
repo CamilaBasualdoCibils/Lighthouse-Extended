@@ -1,5 +1,5 @@
 #pragma once
-#include <Lighthouse/Extended/Rendering/RenderFeatures.hpp>
+#include <Lighthouse/Extended/Rendering/ForwardRenderFeature.hpp>
 #include <Lighthouse/Extended/Materials/Materials.hpp>
 #include <Lighthouse/Extended/Resources/Material.hpp>
 #include <Lighthouse/Extended/Resources/Model.hpp>

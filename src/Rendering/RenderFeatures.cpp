@@ -1,4 +1,9 @@
-#include <Lighthouse/Extended/Rendering/RenderFeatures.hpp>
+#include <Lighthouse/Extended/Rendering/ForwardRenderFeature.hpp>
+#include <Lighthouse/Extended/Rendering/DeferredRenderFeature.hpp>
+#include <Lighthouse/Extended/Rendering/PathTracingRenderFeature.hpp>
+#include <Lighthouse/Extended/Rendering/DeferredRendering.hpp>
+#include "SceneColorResolver.hpp"
+#include <set>
 #include <Lighthouse/Extended/Rendering/ForwardRendering.hpp>
 #include <Lighthouse/Extended/Rendering/EnvironmentProviders.hpp>
 
@@ -36,6 +41,7 @@ void ValidateDestination(RenderFeatureContext& frame, const RenderFeatureResult&
 }
 void DeferredRenderFeature::Update(RenderUpdateContext& ctx)
 {
+  UpdateOne(m_environment,ctx);UpdateOne(m_indirect,ctx);
   UpdateAll(m_preparation, ctx);
   UpdateAll(m_geometry, ctx); UpdateOne(m_shadows, ctx); UpdateOne(m_lighting, ctx);
   UpdateOne(m_reflections, ctx); UpdateAll(m_compositors, ctx); UpdateAll(m_post, ctx);
@@ -44,10 +50,34 @@ RenderFeatureResult DeferredRenderFeature::BuildGraph(RenderFeatureContext& fram
 {
   DeferredRenderContext ctx{frame, std::vector<GBufferResources>(frame.family->views.size()),
                              DeferredRenderResult{RenderFeatureResult{frame.destinations}}};
+  std::set<DeferredSemantics> attachments;
+  std::set<DeferredHistory> histories;
+  auto request=[&](const auto& provider){if(!provider)return;const auto needed=provider->GetDeferredDependencies();attachments.insert(needed.attachments.begin(),needed.attachments.end());histories.insert(needed.history.begin(),needed.history.end());};
+  request(m_environment);request(m_indirect);request(m_lighting);request(m_shadows);request(m_reflections);
+  for(const auto& provider:m_preparation)request(provider);
+  for(const auto& provider:m_geometry)request(provider);
+  for(const auto& provider:m_compositors)request(provider);
+  for(const auto& provider:m_post)request(provider);
+  ctx.requirements={{attachments.begin(),attachments.end()},{histories.begin(),histories.end()}};
+  ctx.rendering=std::make_shared<DeferredRenderServices>(frame.technique.device,ctx.requirements);
+  Hold(frame,ctx.rendering);
+  if(!attachments.empty())ctx.rendering->BeginGeometry(ctx);
   BuildAll(m_preparation, ctx);
+  for(auto history:histories) {
+    const auto found=ctx.output.history.find(history);
+    if(found==ctx.output.history.end())throw std::logic_error("Deferred temporal image history must be supplied by a preparation provider");
+    ValidateRenderTargets(*frame.family,found->second);
+  }
+  if(m_environment && m_environment->GetDeferredSky()){
+    Hold(frame,m_environment);ctx.rendering->BeginGeometry(ctx);
+    m_environment->GetDeferredSky()->BuildGraphDeferred(ctx);
+  }
   BuildAll(m_geometry, ctx);
   BuildOne(m_shadows, ctx);
+  BuildOne(m_indirect, ctx);
   BuildOne(m_lighting, ctx);
+  if(!m_lighting && !ctx.output.color.empty() && ctx.output.color.front().encoding==RenderColorEncoding::SceneLinear)
+    ctx.rendering->Shade(ctx);
   // Reflection providers can read the lit scene and composite their contribution.
   BuildOne(m_reflections, ctx);
   BuildAll(m_compositors, ctx);
@@ -71,6 +101,8 @@ RenderFeatureResult DeferredRenderFeature::BuildGraph(RenderFeatureContext& fram
     Hold(frame, post);
     post->BuildGraphDeferred(ctx);
   }
+  if(!ctx.output.color.empty() && ctx.output.color.front().encoding==RenderColorEncoding::SceneLinear)
+    ResolveSceneColor(frame,ctx.output);
   ValidateDestination(frame, ctx.output);
   return std::move(ctx.output);
 }
@@ -91,10 +123,10 @@ RenderFeatureResult ForwardRenderFeature::BuildGraph(RenderFeatureContext& frame
   BuildOne(m_indirect, ctx);
   m_rendering=std::make_shared<ForwardRenderServices>(frame.technique.device,ctx.lightingShader, ctx.indirectShader, ctx.indirectLayout, ctx.indirectSet);
   ctx.rendering=m_rendering; Hold(frame,m_rendering);
-  if (m_environment && m_environment->GetSky()) {
+  if (m_environment && m_environment->GetForwardSky()) {
     Hold(frame, m_environment);
     m_rendering->BeginGeometry(ctx);
-    m_environment->GetSky()->BuildGraph(frame, ctx.output);
+    m_environment->GetForwardSky()->BuildGraphForward(ctx);
   }
   BuildAll(m_geometry, ctx);
   BuildOne(m_reflections, ctx);
@@ -112,7 +144,8 @@ namespace
 {
 template<class T> void Revision(std::uint64_t& revision, const std::shared_ptr<T>& provider)
 {
-  if (provider) revision = revision * 1099511628211ull ^ provider->GetConfigurationRevision();
+  if (provider)
+    revision = revision * 1099511628211ull ^ provider->GetConfigurationRevision();
 }
 template<class T> void Revision(std::uint64_t& revision, const std::vector<std::shared_ptr<T>>& providers)
 {
@@ -130,6 +163,7 @@ std::uint64_t ForwardRenderFeature::GetConfigurationRevision() const noexcept
 std::uint64_t DeferredRenderFeature::GetConfigurationRevision() const noexcept
 {
   auto revision = m_revision;
+  Revision(revision,m_environment);Revision(revision,m_indirect);
   Revision(revision, m_preparation);
   Revision(revision, m_geometry); Revision(revision, m_shadows); Revision(revision, m_lighting);
   Revision(revision, m_reflections); Revision(revision, m_compositors); Revision(revision, m_post);
